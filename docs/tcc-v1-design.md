@@ -12,12 +12,14 @@ authorization.
 ## Architecture and invariants
 
 `TccTransientController` has Open, Fill, SlipControl, Locked, and
-ReleaseFault states. Fill rises by at most 100 mbar per 20 ms and can never
-exceed the existing learned D2 map value; the configured 10,000 mbar prefill is
-not used. SlipControl starts only after measured slip falls at least 25 RPM
-from the fill-entry value (or is already in the target band). It then walks a
-target-slip trajectory down by at most 10 RPM per cycle and uses bounded
-proportional feedback without exceeding the same map ceiling.
+ReleaseFault states. Fill rises by at most 100 mbar per 20 ms to a conservative
+800 mbar contact-search cap, never directly to the learned D2 map value; the
+configured 10,000 mbar prefill is not used. SlipControl starts only after
+measured slip falls at least 25 RPM from the fill-entry value for three
+confirming cycles (or is already in the target band). It then walks a
+target-slip trajectory in either direction by at most 10 RPM per cycle and
+uses bounded proportional feedback without exceeding the existing learned-map
+ceiling.
 
 Any active shift, actual/target mismatch, invalid speed, hard-open request, or
 post-shift dwell commands zero immediately. A normal map-driven release is
@@ -26,10 +28,12 @@ integral term and transient cycles never enter the legacy adaptation-writing
 branch. The existing diagnostic packet is unchanged; `get_transient_snapshot()`
 is an internal trace seam for a later safe protocol extension.
 
-Current `SensorData` carries no explicit source timestamp. The integration
-therefore rejects zero/`UINT16_MAX` shaft values; upstream CAN getters already
-convert expired engine data to invalid values. Adding source age to the shared
-sensor structure remains an architectural follow-up, not a fake freshness bit.
+The gearbox now passes whether the current engine-RPM read was fresh instead of
+silently treating its cached fallback as live TCC feedback. Invalid physical
+shaft data bypasses `update()` but explicitly resets transient state first.
+Park/Neutral/Reverse, slave mode, diagnostic-control takeover, diagnostic TCC
+disable, and map-initialization failure do the same. Re-entering D2 therefore
+starts at the first 100 mbar step rather than restoring a frozen command.
 
 ## State transitions
 
@@ -38,8 +42,9 @@ application is active it remains eligible until the map exceeds 110 RPM,
 providing Open/Slipping hysteresis. Fill -> SlipControl requires the measured
 contact evidence above. SlipControl -> Locked occurs within the lock band. Any
 shift/mismatch, invalid speed, hard-open request, or dwell enters Open or
-ReleaseFault at zero command. A successful shift starts a 300 ms post-shift
-dwell before reapplication.
+ReleaseFault at zero command. One shared `TccShiftGuard` owns the complete
+gearbox lifecycle and 300 ms post-commit dwell for every gear; the D2 controller
+does not duplicate that timing state.
 
 ## Calibration table
 
@@ -47,11 +52,13 @@ dwell before reapplication.
 |---|---:|---|---|
 | `kPostShiftDwellMs` | 300 | ms, >= 0 | Covers the measured early reapply window; provisional |
 | `kApplySlewPerCycle` | 100 | mbar / 20 ms | Reaches the logged 1,344 mbar ceiling in about 280 ms rather than one tick |
+| `kContactSearchPressure` | 800 | mbar maximum | Below the observed ~1,000 mbar breakaway region; no contact means no further rise |
 | `kDemandReleaseSlewPerCycle` | 400 | mbar / 20 ms | Normal map release only; safety inhibits are immediate zero |
 | `kFeedbackGain` | 4 | mbar / RPM | Small proportional correction, no integral windup |
 | `kFeedbackLimit` | 600 | mbar | Bounds feedback contribution |
 | apply/open hysteresis | 90 / 110 | target RPM | Avoids map-boundary chatter |
 | `kContactSlipDropRpm` | 25 | RPM | Requires observable shaft response before trajectory control |
+| `kContactConfirmCycles` | 3 | 20 ms cycles | Rejects one-sample slip noise as contact |
 | `kTargetSlipSlewPerCycle` | 10 | RPM / 20 ms | A 300->100 RPM synchronization takes at least 400 ms |
 
 These values are conservative starting limits selected for deterministic
@@ -61,11 +68,16 @@ offline testing, not claimed final vehicle calibration.
 
 `test/host_tcc_transient.cpp` covers the August 15 331->285 RPM fixture shape,
 target hysteresis, magnitude handling, measured-contact transition, target
-trajectory, a pressured shift interruption, early callback end with
-actual/target mismatch, post-shift dwell, invalid speed, hard-open behavior,
-map-pressure ceiling, and slew. The source-level integration keeps D3-D5 on
-the existing path; the full firmware build is the regression check for that
-unchanged code path.
+trajectory and undershoot feedback, a pressured shift interruption, early
+callback end with actual/target mismatch, post-shift dwell, invalid speed,
+hard-open behavior, no-contact pressure cap, negative-slip contact, state reset
+and garage D2 re-entry, map-pressure ceiling, and slew. The source-level
+integration keeps D3-D5 on the existing path; the full firmware build is the
+regression check for that unchanged code path.
+
+Run the mandatory host gate with `sh scripts/test_tcc_transient.sh` before the
+full `unified` PlatformIO build. This test is intentionally host-native so the
+pure controller and shift guard run without ESP32 hardware.
 
 ## Integration, rollback, and risks
 

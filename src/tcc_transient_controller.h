@@ -13,7 +13,9 @@ constexpr int kFeedbackGain = 4;
 constexpr int kFeedbackLimit = 600;
 constexpr int kApplyTargetSlipRpm = 90;
 constexpr int kOpenTargetSlipRpm = 110;
+constexpr int kContactSearchPressure = 800;
 constexpr int kContactSlipDropRpm = 25;
+constexpr int kContactConfirmCycles = 3;
 constexpr int kTargetSlipSlewPerCycle = 10;
 constexpr int kLockSlipBand = 12;
 }
@@ -44,13 +46,22 @@ enum class TccTransientReason : uint8_t {
 struct TccTransientInput {
     bool request_apply;
     bool force_open;
-    bool shift_active;
-    bool gear_match;
     bool speed_valid;
     int actual_slip_rpm;
     int target_slip_rpm;
     int feedforward_pressure;
     uint32_t now_ms;
+};
+
+class TccShiftGuard {
+public:
+    bool step(uint32_t now_ms, bool lifecycle_active);
+    void reset();
+
+private:
+    bool lifecycle_was_active_ = false;
+    bool dwell_active_ = false;
+    uint32_t dwell_until_ms_ = 0;
 };
 
 struct TccTransientOutput {
@@ -75,10 +86,10 @@ private:
     TccTransientState state_ = TccTransientState::Open;
     TccTransientReason reason_ = TccTransientReason::None;
     int pressure_ = 0;
-    bool shift_inhibited_ = false;
-    uint32_t dwell_until_ms_ = 0;
     int fill_entry_slip_rpm_ = 0;
+    int previous_slip_rpm_ = 0;
     int trajectory_slip_rpm_ = 0;
+    int contact_confirm_cycles_ = 0;
     bool contact_detected_ = false;
 };
 

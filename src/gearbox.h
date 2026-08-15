@@ -37,7 +37,12 @@ public:
     esp_err_t start_controller(void);
     void inc_gear_request(void);
     void dec_gear_request(void);
-    void diag_inhibit_control(void) { this->diag_stop_control = true; }
+    void diag_inhibit_control(void) {
+        this->diag_stop_control = true;
+        if (this->tcc != nullptr) {
+            this->tcc->reset_transient_state();
+        }
+    }
     void diag_regain_control(void) { this->diag_stop_control = false; }
     SensorData sensor_data;
     OutputData output_data;

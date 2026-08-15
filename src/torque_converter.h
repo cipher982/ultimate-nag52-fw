@@ -32,7 +32,8 @@ class TorqueConverter {
          * @param sensors Sensor data used as input
          * @param shifting True if the car is currently transitioning to new gear
          */
-        void update(GearboxGear curr_gear, GearboxGear targ_gear, PressureManager* pm, AbstractProfile* profile, SensorData* sensors, bool gearbox_shift_active);
+        void update(GearboxGear curr_gear, GearboxGear targ_gear, PressureManager* pm, AbstractProfile* profile, SensorData* sensors, bool gearbox_shift_active, bool engine_speed_fresh);
+        void reset_transient_state();
         TccClutchStatus get_clutch_state(void);
         void save() {
             if (this->tcc_lock_map) {
@@ -121,8 +122,7 @@ class TorqueConverter {
         uint8_t prefill_cycles = 0;
         TccTransientController transient_controller;
         TccTransientOutput transient_snapshot = {TccTransientState::Open, TccTransientReason::None, 0, 0, 0, 0, 0, 0, false};
-        bool shift_guard_was_active = false;
-        uint32_t post_shift_dwell_until = 0;
+        TccShiftGuard shift_guard;
 };
 
 #endif

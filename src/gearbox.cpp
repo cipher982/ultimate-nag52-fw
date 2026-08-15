@@ -851,6 +851,9 @@ void Gearbox::controller_loop()
         uint32_t start = GET_CLOCK_TIME();
         TCUIO::update_io_layer();
         if (CHECK_MODE_BIT_ENABLED(DEVICE_MODE_SLAVE)) {
+            if (this->tcc != nullptr) {
+                this->tcc->reset_transient_state();
+            }
             SOLENOID_CONTROL_EGS_SLAVE slave_rq = egs_can_hal->get_tester_req();
             sol_mpc->set_current_target(__builtin_bswap16(slave_rq.MPC_REQ));
             sol_spc->set_current_target(__builtin_bswap16(slave_rq.SPC_REQ));
@@ -1006,6 +1009,7 @@ void Gearbox::controller_loop()
         sensor_data.kickdown_pressed = kickdown.is_kickdown_newly_pressed(egs_can_hal, 250);
         int tmp_rpm = 0;
         tmp_rpm = egs_can_hal->get_engine_rpm(1000);
+        const bool engine_speed_fresh = tmp_rpm != UINT16_MAX;
         if (tmp_rpm == UINT16_MAX)
         {
             tmp_rpm = this->sensor_data.engine_rpm; // Sub last value!
@@ -1224,13 +1228,16 @@ void Gearbox::controller_loop()
                 {
                     if (this->tcc != nullptr)
                     {
-                        this->tcc->update(this->actual_gear, this->target_gear, this->pressure_mgr, this->current_profile, &this->sensor_data, this->shifting);
+                        this->tcc->update(this->actual_gear, this->target_gear, this->pressure_mgr, this->current_profile, &this->sensor_data, this->shifting, engine_speed_fresh);
                         egs_can_hal->set_clutch_status(this->tcc->get_clutch_state());
                     }
                 }
             }
             else { // Cannot read, or not in foward gear!
                 this->tcc_percent = 0;
+                if (this->tcc != nullptr) {
+                    this->tcc->reset_transient_state();
+                }
                 this->pressure_mgr->set_target_tcc_pressure(0);
                 egs_can_hal->set_clutch_status(TccClutchStatus::Open);
                 // sol_tcc->write_pwm_12_bit(0);
