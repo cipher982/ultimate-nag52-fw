@@ -70,7 +70,7 @@ void TorqueConverter::diag_toggle_tcc_sol(bool en) {
 
 void TorqueConverter::reset_apply_state() {
     this->transient_controller.reset();
-    this->transient_snapshot = {TccTransientState::Open, TccTransientReason::None, 0, 0, 0, 0, 0, 0, false};
+    this->transient_snapshot = {};
     this->tcc_commanded_pressure = 0;
     this->current_tcc_state = InternalTccState::Open;
     this->target_tcc_state = InternalTccState::Open;

@@ -67,6 +67,7 @@ void TccTransientController::reset_control_state() {
     fill_entry_slip_rpm_ = 0;
     previous_slip_rpm_ = 0;
     trajectory_slip_rpm_ = 0;
+    integral_correction_ = 0;
     contact_confirm_cycles_ = 0;
     contact_detected_ = false;
 }
@@ -96,7 +97,8 @@ TccTransientOutput TccTransientController::step(const TccTransientInput& input) 
         reason_ = TccTransientReason::InvalidSpeed;
         pressure_ = 0;
         contact_detected_ = false;
-        return {state_, reason_, pressure_, feedforward, 0, actual_slip, target_slip,
+        integral_correction_ = 0;
+        return {state_, reason_, pressure_, feedforward, 0, 0, 0, actual_slip, 0, target_slip,
             trajectory_slip_rpm_, contact_detected_};
     }
     if (feedforward <= 0 && input.request_apply) {
@@ -104,7 +106,8 @@ TccTransientOutput TccTransientController::step(const TccTransientInput& input) 
         reason_ = TccTransientReason::InvalidPressure;
         pressure_ = 0;
         contact_detected_ = false;
-        return {state_, reason_, pressure_, feedforward, 0, actual_slip, target_slip,
+        integral_correction_ = 0;
+        return {state_, reason_, pressure_, feedforward, 0, 0, 0, actual_slip, 0, target_slip,
             trajectory_slip_rpm_, contact_detected_};
     }
     if (input.force_open) {
@@ -112,8 +115,15 @@ TccTransientOutput TccTransientController::step(const TccTransientInput& input) 
         reason_ = TccTransientReason::DemandOpen;
         pressure_ = 0;
         contact_detected_ = false;
-        return {state_, reason_, pressure_, feedforward, 0, actual_slip, target_slip,
+        integral_correction_ = 0;
+        return {state_, reason_, pressure_, feedforward, 0, 0, 0, actual_slip, 0, target_slip,
             trajectory_slip_rpm_, contact_detected_};
+    }
+    if (state_ == TccTransientState::ReleaseFault &&
+        reason_ == TccTransientReason::ExcessiveSlipRate && input.request_apply) {
+        pressure_ = 0;
+        return {state_, reason_, pressure_, feedforward, 0, 0, 0, actual_slip, 0, target_slip,
+            trajectory_slip_rpm_, false};
     }
 
     const bool already_applying = state_ == TccTransientState::Fill ||
@@ -128,7 +138,8 @@ TccTransientOutput TccTransientController::step(const TccTransientInput& input) 
         state_ = TccTransientState::Open;
         pressure_ = slew(pressure_, 0, TccTransientCalibration::kDemandReleaseSlewPerCycle);
         contact_detected_ = false;
-        return {state_, reason_, pressure_, feedforward, 0, actual_slip, target_slip,
+        integral_correction_ = 0;
+        return {state_, reason_, pressure_, feedforward, 0, 0, 0, actual_slip, 0, target_slip,
             trajectory_slip_rpm_, contact_detected_};
     }
 
@@ -140,9 +151,12 @@ TccTransientOutput TccTransientController::step(const TccTransientInput& input) 
         trajectory_slip_rpm_ = actual_slip;
         contact_confirm_cycles_ = 0;
         contact_detected_ = false;
+        integral_correction_ = 0;
     }
 
     int feedback = 0;
+    int slip_rate_feedback = 0;
+    int slip_delta = 0;
     if (state_ == TccTransientState::Fill) {
         // Fill approaches, but never exceeds, the existing learned map value.
         // There is no 10,000 mbar transient command in this path.
@@ -165,15 +179,52 @@ TccTransientOutput TccTransientController::step(const TccTransientInput& input) 
     } else {
         trajectory_slip_rpm_ = slew(trajectory_slip_rpm_, target_slip,
             TccTransientCalibration::kTargetSlipSlewPerCycle);
-        feedback = clamp_int((actual_slip - trajectory_slip_rpm_) * TccTransientCalibration::kFeedbackGain,
+        const int proportional_feedback = clamp_int(
+            (actual_slip - trajectory_slip_rpm_) * TccTransientCalibration::kFeedbackGain,
             -TccTransientCalibration::kFeedbackLimit, TccTransientCalibration::kFeedbackLimit);
+        slip_delta = actual_slip - previous_slip_rpm_;
+        if (slip_delta < -TccTransientCalibration::kHardSlipClosurePerCycle) {
+            state_ = TccTransientState::ReleaseFault;
+            reason_ = TccTransientReason::ExcessiveSlipRate;
+            pressure_ = 0;
+            integral_correction_ = 0;
+            contact_detected_ = false;
+            previous_slip_rpm_ = actual_slip;
+            return {state_, reason_, pressure_, feedforward, 0, 0, 0, actual_slip, slip_delta,
+                target_slip, trajectory_slip_rpm_, contact_detected_};
+        }
+        slip_rate_feedback = clamp_int(
+            (slip_delta + TccTransientCalibration::kMaxDesiredSlipClosurePerCycle) *
+                TccTransientCalibration::kSlipRateFeedbackGain,
+            -TccTransientCalibration::kSlipRateFeedbackLimit,
+            0);
+        const int slip_error = actual_slip - trajectory_slip_rpm_;
+        const int integral_candidate = clamp_int(
+            integral_correction_ + slip_error / TccTransientCalibration::kIntegralErrorDivisor,
+            -TccTransientCalibration::kIntegralFeedbackLimit,
+            TccTransientCalibration::kIntegralFeedbackLimit);
+        const int candidate_unclamped = feedforward + proportional_feedback +
+            slip_rate_feedback + integral_candidate;
+        const bool winds_down_at_zero = candidate_unclamped <= 0 && slip_error < 0;
+        const bool winds_up_at_ceiling = candidate_unclamped >= feedforward && slip_error > 0;
+        if (!winds_down_at_zero && !winds_up_at_ceiling) {
+            integral_correction_ = integral_candidate;
+        }
+        feedback = clamp_int(proportional_feedback + integral_correction_ + slip_rate_feedback,
+            -TccTransientCalibration::kCombinedFeedbackLimit,
+            TccTransientCalibration::kCombinedFeedbackLimit);
         const int requested = clamp_int(feedforward + feedback, 0, feedforward);
-        pressure_ = slew(pressure_, requested, TccTransientCalibration::kApplySlewPerCycle);
+        const int pressure_slew = slip_rate_feedback < 0 && requested < pressure_
+            ? TccTransientCalibration::kFeedbackReliefSlewPerCycle
+            : TccTransientCalibration::kApplySlewPerCycle;
+        pressure_ = slew(pressure_, requested, pressure_slew);
+        previous_slip_rpm_ = actual_slip;
         state_ = target_slip <= TccTransientCalibration::kLockSlipBand &&
             actual_slip <= target_slip + TccTransientCalibration::kLockSlipBand
             ? TccTransientState::Locked : TccTransientState::SlipControl;
     }
 
-    return {state_, reason_, pressure_, feedforward, feedback, actual_slip, target_slip,
+    return {state_, reason_, pressure_, feedforward, feedback, integral_correction_, slip_rate_feedback,
+        actual_slip, slip_delta, target_slip,
         trajectory_slip_rpm_, contact_detected_};
 }
