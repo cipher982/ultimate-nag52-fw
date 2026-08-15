@@ -159,6 +159,25 @@ int main() {
         assert(out.pressure <= TccTransientCalibration::kContactSearchPressure);
     }
 
+    // Persisted map data is untrusted. Even a 10,000 mbar cell cannot command
+    // above the independent V1 ceiling after contact.
+    c.reset();
+    c.step(in(true, false, true, 331, 89, 10000, 0));
+    c.step(in(true, false, true, 285, 89, 10000, 20));
+    c.step(in(true, false, true, 280, 89, 10000, 40));
+    auto capped_contact = c.step(in(true, false, true, 275, 89, 10000, 60));
+    assert(capped_contact.contact_detected);
+    assert(capped_contact.feedforward_pressure == TccTransientCalibration::kMaxCommandPressure);
+    bool reached_hard_cap = false;
+    for (int i = 4; i < 40; ++i) {
+        auto out = c.step(in(true, false, true, 300, 89, 10000, i * 20));
+        assert(out.pressure <= TccTransientCalibration::kMaxCommandPressure);
+        if (out.pressure == TccTransientCalibration::kMaxCommandPressure) {
+            reached_hard_cap = true;
+        }
+    }
+    assert(reached_hard_cap);
+
     // August 15 stable-D2 fixture: the original one-sample 331->285 change is
     // not enough; contact requires three confirming samples, then a bounded
     // trajectory starts without a 10,000 mbar pulse.

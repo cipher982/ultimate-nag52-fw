@@ -871,6 +871,14 @@ void Gearbox::controller_loop()
     {
         uint32_t start = GET_CLOCK_TIME();
         TCUIO::update_io_layer();
+        // Diagnostic takeover always wins, including over persistent slave
+        // mode. The inhibit call already hard-zeros TCC duty; do not accept a
+        // tester TCC request until control is explicitly regained.
+        if (this->diag_stop_control)
+        {
+            vTaskDelay(50);
+            continue;
+        }
         if (CHECK_MODE_BIT_ENABLED(DEVICE_MODE_SLAVE)) {
             if (this->tcc != nullptr) {
                 this->tcc->reset_transient_state();
@@ -926,12 +934,6 @@ void Gearbox::controller_loop()
             vTaskDelay(20);
             continue;
         }
-        if (this->diag_stop_control)
-        {
-            vTaskDelay(50);
-            continue;
-        }
-
         // Set sensors Motor temperature (Always ran)
         int16_t coolant_temp = egs_can_hal->get_engine_coolant_temp(50);
 
@@ -1142,7 +1144,8 @@ void Gearbox::controller_loop()
         }
         if (this->sensor_data.engine_rpm > 100)
         {
-            if (speeds_valid && is_fwd_gear(this->actual_gear))
+            if (speeds_valid && TCUIO::ratio_feedback_valid() &&
+                is_fwd_gear(this->actual_gear))
             {
                 // Check our range restict (Only for TRRS)
                 switch (egs_can_hal->get_shifter_position(250)) { // Don't use shifter_pos, as that only registers D. Query raw selector pos

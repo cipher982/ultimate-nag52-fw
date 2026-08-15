@@ -60,6 +60,11 @@ void TorqueConverter::diag_toggle_tcc_sol(bool en) {
     this->tcc_solenoid_enabled = en;
     if (!en) {
         this->reset_transient_state();
+        // Diagnostic disable is a physical-output command, not just state for
+        // the next 20 ms controller iteration.
+        if (sol_tcc != nullptr) {
+            sol_tcc->set_duty(0);
+        }
     }
 }
 

@@ -16,6 +16,7 @@ constexpr int kFeedbackLimit = 600;
 constexpr int kApplyTargetSlipRpm = 90;
 constexpr int kOpenTargetSlipRpm = 110;
 constexpr int kContactSearchPressure = 800;
+constexpr int kMaxCommandPressure = 2000;
 constexpr int kContactSlipDropRpm = 25;
 constexpr int kContactConfirmCycles = 3;
 constexpr int kTargetSlipSlewPerCycle = 10;

@@ -86,7 +86,11 @@ void TccTransientController::reset() {
 TccTransientOutput TccTransientController::step(const TccTransientInput& input) {
     const int actual_slip = clamp_int(input.actual_slip_rpm < 0 ? -input.actual_slip_rpm : input.actual_slip_rpm, 0, 10000);
     const int target_slip = clamp_int(input.target_slip_rpm, 0, 10000);
-    const int feedforward = clamp_int(input.feedforward_pressure, 0, 10000);
+    // Persisted adaptation maps are untrusted inputs. V1 has an independent
+    // ceiling so a stale/corrupt 10,000 mbar cell cannot recreate the legacy
+    // full-pressure apply after contact.
+    const int feedforward = clamp_int(input.feedforward_pressure, 0,
+        TccTransientCalibration::kMaxCommandPressure);
     if (!input.speed_valid) {
         state_ = TccTransientState::ReleaseFault;
         reason_ = TccTransientReason::InvalidSpeed;
