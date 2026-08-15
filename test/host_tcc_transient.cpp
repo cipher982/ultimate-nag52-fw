@@ -8,26 +8,125 @@ static TccTransientInput in(bool apply, bool force_open, bool valid,
     return {apply, force_open, valid, slip, target, base, now};
 }
 
+static void assert_shift_trace(uint8_t source_gear, uint8_t destination_gear) {
+    TccShiftGuard guard;
+    TccTransientController controller;
+    uint32_t now = 0;
+
+    controller.select_gear(source_gear);
+    if (source_gear >= 2) {
+        for (int i = 0; i < 4; ++i) {
+            auto out = controller.step(in(true, false, true, 330, 50, 1344, now));
+            assert(out.pressure > 0 && out.pressure <= TccTransientCalibration::kContactSearchPressure);
+            now += TccTransientCalibration::kCycleMs;
+        }
+    }
+
+    // Internal shift active: command must be exactly zero regardless of the
+    // prior gear's controller pressure.
+    auto reason = guard.step(now, true, true, false, 1000);
+    assert(reason == TccTransientReason::ShiftInhibit);
+    assert(controller.step(in(true, true, true, 300, 50, 1344, now)).pressure == 0);
+    now += TccTransientCalibration::kCycleMs;
+
+    // The local shift algorithm may have ended, but actual/target mismatch
+    // continues to hold the converter open.
+    reason = guard.step(now, false, true, true, 300);
+    assert(reason == TccTransientReason::GearMismatch);
+    assert(controller.step(in(true, true, true, 300, 50, 1344, now)).pressure == 0);
+    now += TccTransientCalibration::kCycleMs;
+
+    // Gear commit resets the common controller. A wrong-ratio sample after
+    // the minimum time resets stability confirmation rather than releasing.
+    controller.select_gear(destination_gear);
+    const uint32_t commit_ms = now;
+    reason = guard.step(now, false, false, true, 300);
+    assert(reason == TccTransientReason::PostShiftSettling);
+    assert(controller.step(in(true, true, true, 300, 50, 1344, now)).pressure == 0);
+    while (now - commit_ms < (uint32_t)TccTransientCalibration::kPostShiftMinSettleMs) {
+        now += TccTransientCalibration::kCycleMs;
+        reason = guard.step(now, false, false, true, 300);
+        assert(reason == TccTransientReason::PostShiftSettling);
+        assert(controller.step(in(true, true, true, 300, 50, 1344, now)).pressure == 0);
+    }
+
+    // Five consecutive plausible ratio samples are required. The first four
+    // remain hard-open; the fifth releases into a 100 mbar Fill step.
+    for (int stable = 1; stable <= TccTransientCalibration::kPostShiftStableCycles; ++stable) {
+        now += TccTransientCalibration::kCycleMs;
+        reason = guard.step(now, false, false, true, 20);
+        if (stable < TccTransientCalibration::kPostShiftStableCycles) {
+            assert(reason == TccTransientReason::PostShiftSettling);
+            assert(controller.step(in(true, true, true, 300, 50, 1344, now)).pressure == 0);
+        } else {
+            assert(reason == TccTransientReason::None);
+            const auto reacquire = controller.step(in(true, false, true, 300, 50, 1344, now));
+            assert(reacquire.state == TccTransientState::Fill);
+            assert(reacquire.pressure == TccTransientCalibration::kApplySlewPerCycle);
+            assert(reacquire.pressure <= TccTransientCalibration::kContactSearchPressure);
+        }
+    }
+}
+
 int main() {
     assert(tcc_transient_applies_to_gear(2, true));
     assert(!tcc_transient_applies_to_gear(1, true));
-    assert(!tcc_transient_applies_to_gear(3, true));
-    assert(!tcc_transient_applies_to_gear(4, true));
-    assert(!tcc_transient_applies_to_gear(5, true));
+    assert(tcc_transient_applies_to_gear(3, true));
+    assert(tcc_transient_applies_to_gear(4, true));
+    assert(tcc_transient_applies_to_gear(5, true));
+    assert(!tcc_transient_applies_to_gear(2, false));
 
-    // One authoritative shift lifetime: active shift, actual/target mismatch,
-    // then a 300 ms post-commit dwell. Initial deadline zero never inhibits.
+    // With no observed shift lifecycle, normal same-gear control is released.
     TccShiftGuard guard;
-    assert(!guard.step(0x90000000U, false));
-    assert(guard.step(0, true));
-    assert(guard.step(20, true));
-    assert(guard.step(40, false));
-    assert(guard.step(320, false));
-    assert(!guard.step(340, false));
+    assert(guard.step(0x90000000U, false, false, true, 0) == TccTransientReason::None);
     guard.reset();
-    assert(!guard.step(0, false));
+
+    // Settling is state-based, not a timer-only release. Missing, implausible,
+    // or interrupted ratio samples hold zero indefinitely. Unsigned elapsed
+    // arithmetic also remains correct through the millisecond counter wrap.
+    const uint32_t near_wrap = UINT32_MAX - 40U;
+    assert(guard.step(near_wrap, true, true, false, 1000) == TccTransientReason::ShiftInhibit);
+    assert(guard.step(near_wrap + 20U, false, false, false, 0) == TccTransientReason::PostShiftSettling);
+    uint32_t wrapped_now = near_wrap + 20U;
+    for (int i = 0; i < 20; ++i) {
+        wrapped_now += TccTransientCalibration::kCycleMs;
+        assert(guard.step(wrapped_now, false, false, false, 0) == TccTransientReason::PostShiftSettling);
+    }
+    for (int i = 0; i < 3; ++i) {
+        wrapped_now += TccTransientCalibration::kCycleMs;
+        assert(guard.step(wrapped_now, false, false, true, 80) == TccTransientReason::PostShiftSettling);
+    }
+    wrapped_now += TccTransientCalibration::kCycleMs;
+    assert(guard.step(wrapped_now, false, false, true, 81) == TccTransientReason::PostShiftSettling);
+    for (int i = 1; i <= TccTransientCalibration::kPostShiftStableCycles; ++i) {
+        wrapped_now += TccTransientCalibration::kCycleMs;
+        const auto settle_reason = guard.step(wrapped_now, false, false, true, 80);
+        assert(settle_reason == (i == TccTransientCalibration::kPostShiftStableCycles
+            ? TccTransientReason::None : TccTransientReason::PostShiftSettling));
+    }
+    guard.reset();
+
+    // Exercise every forward shift destination controlled by V1, including
+    // the formerly split D2->legacy-D3 handoff and all useful downshifts.
+    const uint8_t traces[][2] = {
+        {1, 2}, {2, 3}, {3, 4}, {4, 5},
+        {5, 4}, {4, 3}, {3, 2},
+    };
+    for (const auto& trace : traces) {
+        assert_shift_trace(trace[0], trace[1]);
+    }
 
     TccTransientController c;
+
+    // Selecting the same gear preserves a ramp; selecting another gear resets
+    // it, preventing D2 pressure/contact state from leaking into D3.
+    c.select_gear(2);
+    assert(c.step(in(true, false, true, 331, 50, 1344, 0)).pressure == 100);
+    c.select_gear(2);
+    assert(c.step(in(true, false, true, 331, 50, 1344, 20)).pressure == 200);
+    c.select_gear(3);
+    assert(c.step(in(true, false, true, 331, 50, 1344, 40)).pressure == 100);
+    c.reset();
 
     // Open/apply target hysteresis: 95 RPM cannot start an application, but
     // once started the controller remains active until the map exceeds 110.

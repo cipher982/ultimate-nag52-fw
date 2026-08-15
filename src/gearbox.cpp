@@ -1225,7 +1225,26 @@ void Gearbox::controller_loop()
                 {
                     if (this->tcc != nullptr)
                     {
-                        this->tcc->update(this->actual_gear, this->target_gear, this->pressure_mgr, this->current_profile, &this->sensor_data, this->shifting, engine_speed_fresh);
+                        const int expected_input_rpm = calc_input_rpm_from_req_gear(
+                            this->sensor_data.output_rpm,
+                            this->actual_gear,
+                            &this->gearboxConfig
+                        );
+                        const bool ratio_sample_valid = speeds_valid && expected_input_rpm > 0;
+                        const int ratio_error_rpm = ratio_sample_valid
+                            ? abs((int)this->sensor_data.input_rpm - expected_input_rpm)
+                            : INT_MAX;
+                        this->tcc->update(
+                            this->actual_gear,
+                            this->target_gear,
+                            this->pressure_mgr,
+                            this->current_profile,
+                            &this->sensor_data,
+                            this->shifting,
+                            engine_speed_fresh,
+                            ratio_sample_valid,
+                            ratio_error_rpm
+                        );
                         egs_can_hal->set_clutch_status(this->tcc->get_clutch_state());
                     }
                 }

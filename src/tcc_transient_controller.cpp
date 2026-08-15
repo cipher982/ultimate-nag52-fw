@@ -10,36 +10,49 @@ int slew(int current, int target, int limit) {
     return current - (current - target < limit ? current - target : limit);
 }
 
-bool before(uint32_t now, uint32_t deadline) {
-    return static_cast<int32_t>(now - deadline) < 0;
-}
 }
 
-bool TccShiftGuard::step(uint32_t now_ms, bool lifecycle_active) {
-    if (lifecycle_active) {
+TccTransientReason TccShiftGuard::step(uint32_t now_ms, bool gearbox_shift_active,
+    bool gear_mismatch, bool ratio_sample_valid, int ratio_error_rpm) {
+    if (gearbox_shift_active || gear_mismatch) {
         lifecycle_was_active_ = true;
-        dwell_active_ = false;
-        return true;
+        settling_active_ = false;
+        stable_ratio_cycles_ = 0;
+        return gearbox_shift_active
+            ? TccTransientReason::ShiftInhibit : TccTransientReason::GearMismatch;
     }
     if (lifecycle_was_active_) {
         lifecycle_was_active_ = false;
-        dwell_active_ = true;
-        dwell_until_ms_ = now_ms + TccTransientCalibration::kPostShiftDwellMs;
+        settling_active_ = true;
+        settle_started_ms_ = now_ms;
+        stable_ratio_cycles_ = 0;
     }
-    if (dwell_active_ && before(now_ms, dwell_until_ms_)) {
-        return true;
+    if (settling_active_) {
+        if (now_ms - settle_started_ms_ < TccTransientCalibration::kPostShiftMinSettleMs) {
+            return TccTransientReason::PostShiftSettling;
+        }
+        const int ratio_error = ratio_error_rpm < 0 ? -ratio_error_rpm : ratio_error_rpm;
+        if (ratio_sample_valid && ratio_error <= TccTransientCalibration::kPostShiftRatioErrorRpm) {
+            stable_ratio_cycles_ += 1;
+        } else {
+            stable_ratio_cycles_ = 0;
+        }
+        if (stable_ratio_cycles_ < TccTransientCalibration::kPostShiftStableCycles) {
+            return TccTransientReason::PostShiftSettling;
+        }
+        settling_active_ = false;
     }
-    dwell_active_ = false;
-    return false;
+    return TccTransientReason::None;
 }
 
 void TccShiftGuard::reset() {
     lifecycle_was_active_ = false;
-    dwell_active_ = false;
-    dwell_until_ms_ = 0;
+    settling_active_ = false;
+    settle_started_ms_ = 0;
+    stable_ratio_cycles_ = 0;
 }
 
-void TccTransientController::reset() {
+void TccTransientController::reset_control_state() {
     state_ = TccTransientState::Open;
     reason_ = TccTransientReason::None;
     pressure_ = 0;
@@ -48,6 +61,18 @@ void TccTransientController::reset() {
     trajectory_slip_rpm_ = 0;
     contact_confirm_cycles_ = 0;
     contact_detected_ = false;
+}
+
+void TccTransientController::select_gear(uint8_t gear) {
+    if (gear != selected_gear_) {
+        reset_control_state();
+        selected_gear_ = gear;
+    }
+}
+
+void TccTransientController::reset() {
+    reset_control_state();
+    selected_gear_ = 0xFF;
 }
 
 TccTransientOutput TccTransientController::step(const TccTransientInput& input) {
