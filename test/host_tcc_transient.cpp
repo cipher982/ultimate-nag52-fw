@@ -52,7 +52,7 @@ static void assert_shift_trace(uint8_t source_gear, uint8_t destination_gear) {
     }
 
     // Five consecutive plausible ratio samples are required. The first four
-    // remain hard-open; the fifth releases into a 100 mbar Fill step.
+    // remain hard-open; the fifth releases into one bounded Fill step.
     for (int stable = 1; stable <= TccTransientCalibration::kPostShiftStableCycles; ++stable) {
         now += TccTransientCalibration::kCycleMs;
         reason = guard.step(now, false, false, true, 20, ++ratio_epoch);
@@ -131,11 +131,14 @@ int main() {
     // Selecting the same gear preserves a ramp; selecting another gear resets
     // it, preventing D2 pressure/contact state from leaking into D3.
     c.select_gear(2);
-    assert(c.step(in(true, false, true, 331, 50, 1344, 0)).pressure == 100);
+    assert(c.step(in(true, false, true, 331, 50, 1344, 0)).pressure ==
+        TccTransientCalibration::kApplySlewPerCycle);
     c.select_gear(2);
-    assert(c.step(in(true, false, true, 331, 50, 1344, 20)).pressure == 200);
+    assert(c.step(in(true, false, true, 331, 50, 1344, 20)).pressure ==
+        2 * TccTransientCalibration::kApplySlewPerCycle);
     c.select_gear(3);
-    assert(c.step(in(true, false, true, 331, 50, 1344, 40)).pressure == 100);
+    assert(c.step(in(true, false, true, 331, 50, 1344, 40)).pressure ==
+        TccTransientCalibration::kApplySlewPerCycle);
     c.reset();
 
     // Open/apply target hysteresis: 95 RPM cannot start an application, but
@@ -143,9 +146,11 @@ int main() {
     auto held_open = c.step(in(true, false, true, 331, 95, 1344, 0));
     assert(held_open.state == TccTransientState::Open && held_open.pressure == 0);
     auto started = c.step(in(true, false, true, 331, 89, 1344, 20));
-    assert(started.state == TccTransientState::Fill && started.pressure == 100);
+    assert(started.state == TccTransientState::Fill &&
+        started.pressure == TccTransientCalibration::kApplySlewPerCycle);
     auto held_apply = c.step(in(false, false, true, 320, 105, 1344, 40));
-    assert(held_apply.state == TccTransientState::Fill && held_apply.pressure == 200);
+    assert(held_apply.state == TccTransientState::Fill &&
+        held_apply.pressure == 2 * TccTransientCalibration::kApplySlewPerCycle);
     auto opened = c.step(in(false, false, true, 320, 111, 1344, 60));
     assert(opened.state == TccTransientState::Open && opened.pressure < held_apply.pressure);
 
@@ -169,7 +174,7 @@ int main() {
     assert(capped_contact.contact_detected);
     assert(capped_contact.feedforward_pressure == TccTransientCalibration::kMaxCommandPressure);
     bool reached_hard_cap = false;
-    for (int i = 4; i < 40; ++i) {
+    for (int i = 4; i < 80; ++i) {
         auto out = c.step(in(true, false, true, 300, 89, 10000, i * 20));
         assert(out.pressure <= TccTransientCalibration::kMaxCommandPressure);
         if (out.pressure == TccTransientCalibration::kMaxCommandPressure) {
@@ -183,22 +188,26 @@ int main() {
     // trajectory starts without a 10,000 mbar pulse.
     c.reset();
     auto first = c.step(in(true, false, true, 331, 89, 1344, 0));
-    assert(first.state == TccTransientState::Fill && first.pressure == 100);
+    assert(first.state == TccTransientState::Fill &&
+        first.pressure == TccTransientCalibration::kApplySlewPerCycle);
     auto drop1 = c.step(in(true, false, true, 285, 89, 1344, 20));
     auto drop2 = c.step(in(true, false, true, 280, 89, 1344, 40));
     auto contact = c.step(in(true, false, true, 275, 89, 1344, 60));
     assert(!drop1.contact_detected && !drop2.contact_detected);
     assert(contact.state == TccTransientState::SlipControl && contact.contact_detected);
-    assert(contact.pressure == 400 && contact.trajectory_slip_rpm == 275);
+    assert(contact.pressure == 4 * TccTransientCalibration::kApplySlewPerCycle &&
+        contact.trajectory_slip_rpm == 275);
     int previous_trajectory = contact.trajectory_slip_rpm;
     int previous_pressure = contact.pressure;
     bool saw_negative_feedback = false;
     for (int i = 4; i < 30; ++i) {
         // Deliberately cross below the trajectory to prove pressure backs off.
-        const int observed_slip = i < 12 ? 275 - (i - 3) * 12 : 80;
+        const int observed_slip = std::max(80, 275 - (i - 3) * 12);
         auto out = c.step(in(true, false, true, observed_slip, 89, 1344, i * 20));
         assert(out.pressure >= 0 && out.pressure <= 1344);
-        assert(std::abs(out.pressure - previous_pressure) <= TccTransientCalibration::kApplySlewPerCycle);
+        const int pressure_delta = out.pressure - previous_pressure;
+        assert(pressure_delta <= TccTransientCalibration::kApplySlewPerCycle);
+        assert(pressure_delta >= -TccTransientCalibration::kFeedbackReliefSlewPerCycle);
         assert(std::abs(out.trajectory_slip_rpm - previous_trajectory) <= TccTransientCalibration::kTargetSlipSlewPerCycle);
         if (out.feedback_correction < 0) saw_negative_feedback = true;
         previous_trajectory = out.trajectory_slip_rpm;

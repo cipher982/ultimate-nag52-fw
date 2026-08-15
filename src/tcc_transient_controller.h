@@ -3,16 +3,24 @@
 
 #include <stdint.h>
 
-// Provisional V1 limits. Units are mbar, RPM, and milliseconds.
+// Provisional V2 Phase-1 limits. Units are mbar, RPM, and milliseconds.
 namespace TccTransientCalibration {
 constexpr int kCycleMs = 20;
 constexpr int kPostShiftMinSettleMs = 100;
 constexpr int kPostShiftStableCycles = 5;
 constexpr int kPostShiftRatioErrorRpm = 80;
-constexpr int kApplySlewPerCycle = 100;
+constexpr int kApplySlewPerCycle = 30;
 constexpr int kDemandReleaseSlewPerCycle = 400;
-constexpr int kFeedbackGain = 4;
-constexpr int kFeedbackLimit = 600;
+constexpr int kFeedbackGain = 2;
+constexpr int kFeedbackLimit = 800;
+constexpr int kIntegralErrorDivisor = 8;
+constexpr int kIntegralFeedbackLimit = 600;
+constexpr int kSlipRateFeedbackGain = 10;
+constexpr int kSlipRateFeedbackLimit = 600;
+constexpr int kMaxDesiredSlipClosurePerCycle = 20;
+constexpr int kHardSlipClosurePerCycle = 30;
+constexpr int kCombinedFeedbackLimit = 1400;
+constexpr int kFeedbackReliefSlewPerCycle = 60;
 constexpr int kApplyTargetSlipRpm = 90;
 constexpr int kOpenTargetSlipRpm = 110;
 constexpr int kContactSearchPressure = 800;
@@ -44,6 +52,7 @@ enum class TccTransientReason : uint8_t {
     InvalidSpeed = 5,
     TargetHysteresis = 6,
     InvalidPressure = 7,
+    ExcessiveSlipRate = 8,
 };
 
 struct TccTransientInput {
@@ -77,7 +86,10 @@ struct TccTransientOutput {
     int pressure;
     int feedforward_pressure;
     int feedback_correction;
+    int integral_correction;
+    int slip_rate_correction;
     int slip_rpm;
+    int slip_delta_rpm;
     int target_slip_rpm;
     int trajectory_slip_rpm;
     bool contact_detected;
@@ -98,6 +110,7 @@ private:
     int fill_entry_slip_rpm_ = 0;
     int previous_slip_rpm_ = 0;
     int trajectory_slip_rpm_ = 0;
+    int integral_correction_ = 0;
     int contact_confirm_cycles_ = 0;
     bool contact_detected_ = false;
     uint8_t selected_gear_ = 0xFF;
