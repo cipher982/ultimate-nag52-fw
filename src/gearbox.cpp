@@ -1274,6 +1274,18 @@ void Gearbox::controller_loop()
                         egs_can_hal->set_clutch_status(this->tcc->get_clutch_state());
                     }
                 }
+                else
+                {
+                    // A garage shift can make target non-forward while actual
+                    // still reports D2-D5. Do not retain the last forward TCC
+                    // pressure until the mechanical gear state catches up.
+                    this->tcc_percent = 0;
+                    if (this->tcc != nullptr) {
+                        this->tcc->reset_transient_state();
+                    }
+                    this->pressure_mgr->set_target_tcc_pressure(0);
+                    egs_can_hal->set_clutch_status(TccClutchStatus::Open);
+                }
             }
             else { // Cannot read, or not in foward gear!
                 this->tcc_percent = 0;

@@ -184,8 +184,11 @@ void update_rpm_sensors() {
         }
         const uint16_t fresh_rl = egs_can_hal->get_rear_left_wheel(40);
         const uint16_t fresh_rr = egs_can_hal->get_rear_right_wheel(40);
+        // Both wheel values come from one source frame. Do not let a newly
+        // valid side combine with OnePollSensor's cached value for an invalid
+        // side and masquerade as a complete new ratio measurement.
         output_source_fresh = new_rear_wheel_sample &&
-            (fresh_rl != UINT16_MAX || fresh_rr != UINT16_MAX);
+            fresh_rl != UINT16_MAX && fresh_rr != UINT16_MAX;
         add_to_onepoll_sensor(&onepoll_rl_speed, fresh_rl);
         add_to_onepoll_sensor(&onepoll_rr_speed, fresh_rr);
         uint16_t rl = TCUIO::wheel_rl_2x_rpm();
