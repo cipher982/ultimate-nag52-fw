@@ -220,7 +220,7 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
             slipping_rpm_targ = MAX(this->slip_target, 50);
         } 
         // Engine is requesting full TCC open
-        else if (TCC_CURRENT_SETTINGS.react_on_engine_open_request) {
+        else if (TCC_CURRENT_SETTINGS.react_on_engine_open_request && engine_req_state == TccReqState::Open) {
             targ = InternalTccState::Open;
             slipping_rpm_targ = SLIP_V_WHEN_OPEN;
             engine_forced_open = true;
@@ -312,6 +312,9 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
                 ? InternalTccState::Open : InternalTccState::Slipping);
         transient_handled = true;
     }
+    // Freeze D2 adaptation for the first controlled A/B candidate. The
+    // transient controller deliberately uses the preserved learned maps as
+    // read-only ceilings so the vehicle test cannot rewrite its own baseline.
     // Prefilling when suddenly increasing state requested. D2 is handled above;
     // this legacy path intentionally remains unchanged for D1 and D3-D5.
     if (!transient_handled && this->target_tcc_state > this->current_tcc_state && this->tcc_actual_pressure/100 < 100 && !prefill_done) {

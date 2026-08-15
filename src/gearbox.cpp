@@ -1248,14 +1248,23 @@ void Gearbox::controller_loop()
                 xTaskCreatePinnedToCore(Gearbox::start_shift_thread, "Shift handler", 8192, this, 10, &this->shift_task, 1);
             }
         }
-        else if (!shifting)
+        else
         {
-            sol_mpc->set_current_target(0);
-            sol_spc->set_current_target(0);
-            sol_tcc->set_duty(0);
-            this->pressure_mgr->set_shift_circuit(ShiftCircuit::sc_1_2, false);
-            this->pressure_mgr->set_shift_circuit(ShiftCircuit::sc_2_3, false);
-            this->pressure_mgr->set_shift_circuit(ShiftCircuit::sc_3_4, false);
+            // The engine-stopped path bypasses TorqueConverter::update(). Do
+            // not retain a partially applied D2 transient across a stall or
+            // key cycle and restore it on the first running control tick.
+            if (this->tcc != nullptr) {
+                this->tcc->reset_transient_state();
+            }
+            this->pressure_mgr->set_target_tcc_pressure(0);
+            if (!shifting) {
+                sol_mpc->set_current_target(0);
+                sol_spc->set_current_target(0);
+                sol_tcc->set_duty(0);
+                this->pressure_mgr->set_shift_circuit(ShiftCircuit::sc_1_2, false);
+                this->pressure_mgr->set_shift_circuit(ShiftCircuit::sc_2_3, false);
+                this->pressure_mgr->set_shift_circuit(ShiftCircuit::sc_3_4, false);
+            }
         }
 
         int16_t tmp_atf = TCUIO::atf_temperature();
