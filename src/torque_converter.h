@@ -10,6 +10,7 @@
 #include "pressure_manager.h"
 #include "canbus/can_hal.h"
 #include "nvs/module_settings.h"
+#include "tcc_transient_controller.h"
 
 enum class InternalTccState {
     Open = 0,
@@ -31,7 +32,7 @@ class TorqueConverter {
          * @param sensors Sensor data used as input
          * @param shifting True if the car is currently transitioning to new gear
          */
-        void update(GearboxGear curr_gear, GearboxGear targ_gear, PressureManager* pm, AbstractProfile* profile, SensorData* sensors);
+        void update(GearboxGear curr_gear, GearboxGear targ_gear, PressureManager* pm, AbstractProfile* profile, SensorData* sensors, bool gearbox_shift_active);
         TccClutchStatus get_clutch_state(void);
         void save() {
             if (this->tcc_lock_map) {
@@ -57,6 +58,7 @@ class TorqueConverter {
         uint8_t get_can_req_bits();
         uint16_t get_current_pressure();
         uint16_t get_target_pressure();
+        TccTransientOutput get_transient_snapshot() const { return this->transient_snapshot; }
         uint16_t get_slip_targ() {
             return this->slip_target;
         }
@@ -117,6 +119,10 @@ class TorqueConverter {
         bool prefill_done = false;
         bool prefill_running = false;
         uint8_t prefill_cycles = 0;
+        TccTransientController transient_controller;
+        TccTransientOutput transient_snapshot = {TccTransientState::Open, TccTransientReason::None, 0, 0, 0, 0, 0};
+        bool shift_guard_was_active = false;
+        uint32_t post_shift_dwell_until = 0;
 };
 
 #endif
