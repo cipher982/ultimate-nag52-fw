@@ -81,6 +81,13 @@ class EgsBaseCan {
         virtual uint16_t get_rear_left_wheel(const uint32_t expire_time_ms) {
             return UINT16_MAX;
         }
+
+        // Monotonic counter for genuinely new rear-wheel source frames. The
+        // TCC post-shift guard uses this instead of counting repeated reads of
+        // one still-unexpired CAN cache entry as new ratio measurements.
+        uint32_t get_rear_wheel_sample_epoch() const {
+            return this->rear_wheel_sample_epoch;
+        }
         
 
         ShifterPosition get_shifter_position(const uint32_t expire_time_ms) {
@@ -354,6 +361,10 @@ class EgsBaseCan {
         Shifter* shifter;
 
     protected:
+        void note_rear_wheel_sample() {
+            this->rear_wheel_sample_epoch += 1;
+        }
+
         const char* name;
         TaskHandle_t task = nullptr;
         uint8_t tx_time_ms = 0;
@@ -391,6 +402,7 @@ class EgsBaseCan {
         UN52_REPORT_EGS_SLAVE un52_slave_resp;
         uint64_t bus_reset_time = 0;
         uint8_t bus_reset_count = 0;
+        volatile uint32_t rear_wheel_sample_epoch = 0;
 };
 
 extern EgsBaseCan* egs_can_hal;

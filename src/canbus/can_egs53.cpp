@@ -702,7 +702,10 @@ void Egs53Can::on_rx_frame(uint32_t id,  uint8_t dlc, uint64_t data, const uint3
     if(this->ecm_ecu.import_frames(data, id, timestamp)) {
     } else if (this->fscm_ecu.import_frames(data, id, timestamp)) {
     } else if (this->tslm_ecu.import_frames(data, id, timestamp)) {
-    }   
+    }
+    if (id == WHL_STAT2_EGS53_CAN_ID) {
+        this->note_rear_wheel_sample();
+    }
 }
 
 void Egs53Can::on_rx_done(const uint32_t now_ts) {

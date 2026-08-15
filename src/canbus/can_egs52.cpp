@@ -892,4 +892,7 @@ void Egs52Can::on_rx_frame(uint32_t id,  uint8_t dlc, uint64_t data, const uint3
     } else if (this->misc_ecu.import_frames(data, id, timestamp)) {
     } else if (this->ezs_ecu.import_frames(data, id, timestamp)) {
     }
+    if (id == BS_208_EGS52_CAN_ID) {
+        this->note_rear_wheel_sample();
+    }
 }

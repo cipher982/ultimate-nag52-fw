@@ -333,4 +333,7 @@ bool HfmCan::get_is_brake_pressed(const uint32_t expire_time_ms)
 void HfmCan::on_rx_frame(uint32_t id, uint8_t dlc, uint64_t data, const uint32_t timestamp)
 {
     this->hfm_ecu.import_frames(data, id, timestamp);
+    if (id == HFM_210_CAN_ID) {
+        this->note_rear_wheel_sample();
+    }
 }

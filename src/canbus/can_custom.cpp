@@ -326,4 +326,7 @@ void CustomCan::on_rx_frame(uint32_t id,  uint8_t dlc, uint64_t data, const uint
     } else if (this->brakes.import_frames(data, id, timestamp)) {
     } else if (this->ewm.import_frames(data, id, timestamp)) {
     }
+    if (id == WHEELS_300_CUSTOMCAN_CAN_ID) {
+        this->note_rear_wheel_sample();
+    }
 }
