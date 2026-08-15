@@ -199,6 +199,7 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
         }
     }
 
+    bool engine_forced_open = false;
     TccReqState engine_req_state = egs_can_hal->get_engine_tcc_override_request(500);
     if (TccReqState::None != engine_req_state) {
         // Engine is requesting at most to slip the converter
@@ -210,6 +211,7 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
         else if (TCC_CURRENT_SETTINGS.react_on_engine_open_request) {
             targ = InternalTccState::Open;
             slipping_rpm_targ = SLIP_V_WHEN_OPEN;
+            engine_forced_open = true;
         }
     }
     // Variable set
@@ -225,6 +227,7 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
         targ = InternalTccState::Open;
         slipping_rpm_targ = SLIP_V_WHEN_OPEN;
     }
+    const int controller_target_slip = slipping_rpm_targ;
     this->target_tcc_state = targ;
     this->slip_target = MIN(slipping_rpm_targ, SLIP_V_WHEN_OPEN);
 
@@ -286,14 +289,13 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
             : this->tcc_slip_map->get_value(load_as_percent, (uint8_t)curr_gear);
         TccTransientInput transient_input = {
             this->target_tcc_state != InternalTccState::Open,
+            shift_guard || engine_forced_open || !can_enable_tcc,
             gearbox_shift_active,
             !gear_mismatch,
             sensors->engine_rpm > 0 && sensors->input_rpm > 0 && sensors->engine_rpm != UINT16_MAX && sensors->input_rpm != UINT16_MAX,
-            true, // SensorData has no source-age field; freshness is documented as an integration gap.
-            (int)sensors->engine_rpm - (int)sensors->input_rpm,
-            this->slip_target,
+            abs((int)sensors->engine_rpm - (int)sensors->input_rpm),
+            controller_target_slip,
             base_pressure,
-            TCC_CURRENT_SETTINGS.prefill_pressure,
             now_ms,
         };
         this->transient_snapshot = this->transient_controller.step(transient_input);

@@ -120,7 +120,7 @@ class TorqueConverter {
         bool prefill_running = false;
         uint8_t prefill_cycles = 0;
         TccTransientController transient_controller;
-        TccTransientOutput transient_snapshot = {TccTransientState::Open, TccTransientReason::None, 0, 0, 0, 0, 0};
+        TccTransientOutput transient_snapshot = {TccTransientState::Open, TccTransientReason::None, 0, 0, 0, 0, 0, 0, false};
         bool shift_guard_was_active = false;
         uint32_t post_shift_dwell_until = 0;
 };
