@@ -34,8 +34,11 @@ class TorqueConverter {
          */
         void update(GearboxGear curr_gear, GearboxGear targ_gear, PressureManager* pm,
             AbstractProfile* profile, SensorData* sensors, bool gearbox_shift_active,
-            bool engine_speed_fresh, bool ratio_sample_valid, int ratio_error_rpm);
+            bool engine_speed_fresh, bool ratio_sample_valid, int ratio_error_rpm,
+            uint32_t ratio_sample_epoch);
         void reset_transient_state();
+        void inhibit_for_invalid_speeds(bool gearbox_shift_active,
+            bool gear_mismatch, uint32_t ratio_sample_epoch);
         TccClutchStatus get_clutch_state(void);
         void save() {
             if (this->tcc_lock_map) {
@@ -91,6 +94,7 @@ class TorqueConverter {
         }
 
     private:
+        void reset_apply_state();
         // Multiplied by 100!
         int tcc_slip_filtered = 0;
         int rated_max_torque;

@@ -160,6 +160,27 @@ Gearbox::Gearbox(Shifter* shifter) : shifter(shifter), kickdown(), brake_pedal()
     this->pedal_delta = new DeltaTracker(25);
 }
 
+void Gearbox::diag_inhibit_control(void) {
+    this->diag_stop_control = true;
+    if (this->tcc != nullptr) {
+        this->tcc->reset_transient_state();
+    }
+    if (this->pressure_mgr != nullptr) {
+        this->pressure_mgr->set_tcc_inhibited(true);
+        this->pressure_mgr->set_target_tcc_pressure(0);
+    }
+    if (sol_tcc != nullptr) {
+        sol_tcc->set_duty(0);
+    }
+}
+
+void Gearbox::diag_regain_control(void) {
+    if (this->pressure_mgr != nullptr) {
+        this->pressure_mgr->set_tcc_inhibited(false);
+    }
+    this->diag_stop_control = false;
+}
+
 bool Gearbox::is_stationary() {
     return this->sensor_data.input_rpm < 100 && this->sensor_data.output_rpm < 100;
 }
@@ -1008,7 +1029,7 @@ void Gearbox::controller_loop()
         sensor_data.brake_pressed = brake_pedal.is_brake_pedal_pressed(egs_can_hal, 250);
         sensor_data.kickdown_pressed = kickdown.is_kickdown_newly_pressed(egs_can_hal, 250);
         int tmp_rpm = 0;
-        tmp_rpm = egs_can_hal->get_engine_rpm(1000);
+        tmp_rpm = egs_can_hal->get_engine_rpm(100);
         const bool engine_speed_fresh = tmp_rpm != UINT16_MAX;
         if (tmp_rpm == UINT16_MAX)
         {
@@ -1233,7 +1254,8 @@ void Gearbox::controller_loop()
                             this->actual_gear,
                             &this->gearboxConfig
                         );
-                        const bool ratio_sample_valid = speeds_valid && expected_input_rpm > 0;
+                        const bool ratio_sample_valid = speeds_valid &&
+                            TCUIO::ratio_feedback_fresh() && expected_input_rpm > 0;
                         const int ratio_error_rpm = ratio_sample_valid
                             ? abs((int)this->sensor_data.input_rpm - expected_input_rpm)
                             : INT_MAX;
@@ -1246,7 +1268,8 @@ void Gearbox::controller_loop()
                             this->shifting,
                             engine_speed_fresh,
                             ratio_sample_valid,
-                            ratio_error_rpm
+                            ratio_error_rpm,
+                            TCUIO::ratio_sample_epoch()
                         );
                         egs_can_hal->set_clutch_status(this->tcc->get_clutch_state());
                     }
@@ -1255,7 +1278,15 @@ void Gearbox::controller_loop()
             else { // Cannot read, or not in foward gear!
                 this->tcc_percent = 0;
                 if (this->tcc != nullptr) {
-                    this->tcc->reset_transient_state();
+                    if (is_fwd_gear(this->actual_gear) && is_fwd_gear(this->target_gear)) {
+                        this->tcc->inhibit_for_invalid_speeds(
+                            this->shifting,
+                            this->actual_gear != this->target_gear,
+                            TCUIO::ratio_sample_epoch()
+                        );
+                    } else {
+                        this->tcc->reset_transient_state();
+                    }
                 }
                 this->pressure_mgr->set_target_tcc_pressure(0);
                 egs_can_hal->set_clutch_status(TccClutchStatus::Open);

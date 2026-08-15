@@ -63,9 +63,8 @@ void TorqueConverter::diag_toggle_tcc_sol(bool en) {
     }
 }
 
-void TorqueConverter::reset_transient_state() {
+void TorqueConverter::reset_apply_state() {
     this->transient_controller.reset();
-    this->shift_guard.reset();
     this->transient_snapshot = {TccTransientState::Open, TccTransientReason::None, 0, 0, 0, 0, 0, 0, false};
     this->tcc_commanded_pressure = 0;
     this->current_tcc_state = InternalTccState::Open;
@@ -74,6 +73,29 @@ void TorqueConverter::reset_transient_state() {
     this->prefill_done = false;
     this->prefill_running = false;
     this->prefill_cycles = 0;
+}
+
+void TorqueConverter::reset_transient_state() {
+    this->reset_apply_state();
+    this->shift_guard.reset();
+}
+
+void TorqueConverter::inhibit_for_invalid_speeds(bool gearbox_shift_active,
+    bool gear_mismatch, uint32_t ratio_sample_epoch) {
+    const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    this->shift_guard.step(
+        now_ms,
+        gearbox_shift_active,
+        gear_mismatch,
+        false,
+        INT_MAX,
+        ratio_sample_epoch
+    );
+    // Clear pressure/contact/trajectory state but preserve the gearbox-lifetime
+    // shift guard. A one-tick speed dropout must not erase an active post-shift
+    // settling requirement or hide a shift that began during the dropout.
+    this->reset_apply_state();
+    this->transient_snapshot.reason = TccTransientReason::InvalidSpeed;
 }
 
 void set_adapt_cell(int16_t* dest, GearboxGear gear, uint8_t load_idx, int16_t offset) {
@@ -106,7 +128,7 @@ void TorqueConverter::calc_pid_score() {
 void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
     PressureManager* pm, AbstractProfile* profile, SensorData* sensors,
     bool gearbox_shift_active, bool engine_speed_fresh, bool ratio_sample_valid,
-    int ratio_error_rpm) {
+    int ratio_error_rpm, uint32_t ratio_sample_epoch) {
     int slip_now = abs((int32_t)sensors->engine_rpm-(int32_t)sensors->input_rpm);
     int motor_torque = sensors->converted_torque;
     int load_as_percent = abs(((int)motor_torque*100) / this->rated_max_torque);
@@ -237,7 +259,8 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
         gearbox_shift_active,
         gear_mismatch,
         ratio_sample_valid,
-        ratio_error_rpm
+        ratio_error_rpm,
+        ratio_sample_epoch
     );
     const bool shift_guard_active = shift_guard_reason != TccTransientReason::None;
     if (shift_guard_active) {

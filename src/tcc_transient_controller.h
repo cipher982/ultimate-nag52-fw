@@ -58,7 +58,8 @@ struct TccTransientInput {
 class TccShiftGuard {
 public:
     TccTransientReason step(uint32_t now_ms, bool gearbox_shift_active,
-        bool gear_mismatch, bool ratio_sample_valid, int ratio_error_rpm);
+        bool gear_mismatch, bool ratio_sample_valid, int ratio_error_rpm,
+        uint32_t ratio_sample_epoch);
     void reset();
 
 private:
@@ -66,6 +67,7 @@ private:
     bool settling_active_ = false;
     uint32_t settle_started_ms_ = 0;
     int stable_ratio_cycles_ = 0;
+    uint32_t last_ratio_sample_epoch_ = 0;
 };
 
 struct TccTransientOutput {

@@ -128,6 +128,12 @@ public:
     uint16_t calc_max_torque_for_clutch(GearboxGear gear, Clutch clutch, uint16_t pressure, CoefficientTy coef_val);
     int calc_max_torque_for_clutch_signed(GearboxGear gear, Clutch clutch, int pressure, CoefficientTy coef_val);
     void update_pressures(GearboxGear current_gear, GearChange change_state);
+    void set_tcc_inhibited(bool inhibited) {
+        this->tcc_inhibited = inhibited;
+        if (inhibited) {
+            this->target_tcc_pressure = 0;
+        }
+    }
 
     PrefillData make_fill_data(Clutch applying);
     StoredMap* get_tcc_pwm_map(void);
@@ -150,6 +156,7 @@ public:
         return ret;
     }
 private:
+    volatile bool tcc_inhibited = false;
 
      /**
      * Returns the estimated PWM to send to either SPC or MPC solenoid

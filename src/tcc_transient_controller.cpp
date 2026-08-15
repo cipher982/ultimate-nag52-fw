@@ -13,11 +13,13 @@ int slew(int current, int target, int limit) {
 }
 
 TccTransientReason TccShiftGuard::step(uint32_t now_ms, bool gearbox_shift_active,
-    bool gear_mismatch, bool ratio_sample_valid, int ratio_error_rpm) {
+    bool gear_mismatch, bool ratio_sample_valid, int ratio_error_rpm,
+    uint32_t ratio_sample_epoch) {
     if (gearbox_shift_active || gear_mismatch) {
         lifecycle_was_active_ = true;
         settling_active_ = false;
         stable_ratio_cycles_ = 0;
+        last_ratio_sample_epoch_ = ratio_sample_epoch;
         return gearbox_shift_active
             ? TccTransientReason::ShiftInhibit : TccTransientReason::GearMismatch;
     }
@@ -26,16 +28,21 @@ TccTransientReason TccShiftGuard::step(uint32_t now_ms, bool gearbox_shift_activ
         settling_active_ = true;
         settle_started_ms_ = now_ms;
         stable_ratio_cycles_ = 0;
+        last_ratio_sample_epoch_ = ratio_sample_epoch;
     }
     if (settling_active_) {
         if (now_ms - settle_started_ms_ < TccTransientCalibration::kPostShiftMinSettleMs) {
             return TccTransientReason::PostShiftSettling;
         }
-        const int ratio_error = ratio_error_rpm < 0 ? -ratio_error_rpm : ratio_error_rpm;
-        if (ratio_sample_valid && ratio_error <= TccTransientCalibration::kPostShiftRatioErrorRpm) {
-            stable_ratio_cycles_ += 1;
-        } else {
-            stable_ratio_cycles_ = 0;
+        const bool new_ratio_sample = ratio_sample_epoch != last_ratio_sample_epoch_;
+        if (new_ratio_sample) {
+            last_ratio_sample_epoch_ = ratio_sample_epoch;
+            const int ratio_error = ratio_error_rpm < 0 ? -ratio_error_rpm : ratio_error_rpm;
+            if (ratio_sample_valid && ratio_error <= TccTransientCalibration::kPostShiftRatioErrorRpm) {
+                stable_ratio_cycles_ += 1;
+            } else {
+                stable_ratio_cycles_ = 0;
+            }
         }
         if (stable_ratio_cycles_ < TccTransientCalibration::kPostShiftStableCycles) {
             return TccTransientReason::PostShiftSettling;
@@ -50,6 +57,7 @@ void TccShiftGuard::reset() {
     settling_active_ = false;
     settle_started_ms_ = 0;
     stable_ratio_cycles_ = 0;
+    last_ratio_sample_epoch_ = 0;
 }
 
 void TccTransientController::reset_control_state() {
@@ -139,9 +147,7 @@ TccTransientOutput TccTransientController::step(const TccTransientInput& input) 
         pressure_ = slew(pressure_, contact_search_pressure, TccTransientCalibration::kApplySlewPerCycle);
         const bool cumulative_drop = fill_entry_slip_rpm_ - actual_slip >= TccTransientCalibration::kContactSlipDropRpm;
         const bool falling_or_steady = actual_slip <= previous_slip_rpm_ + 2;
-        const bool in_target_band = actual_slip <= target_slip + TccTransientCalibration::kLockSlipBand;
-        const bool contact_evidence = cumulative_drop || in_target_band;
-        if (pressure_ > 0 && contact_evidence && falling_or_steady) {
+        if (pressure_ > 0 && cumulative_drop && falling_or_steady) {
             contact_confirm_cycles_ += 1;
         } else if (!falling_or_steady) {
             contact_confirm_cycles_ = 0;

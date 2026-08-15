@@ -29,6 +29,9 @@ TCUIO::OnePollSensor<int16_t> onepoll_motor_oil_temperature;
 SensorDataRaw raw_sensors;
 TransferCaseState last_transfer_case_pos = TransferCaseState::SNA;
 bool block_shifting = false;
+bool RATIO_FEEDBACK_FRESH = false;
+uint32_t RATIO_SAMPLE_EPOCH = 0;
+uint32_t LAST_REAR_WHEEL_SAMPLE_EPOCH = 0;
 
 void init_smoothed_sensor(TCUIO::SmoothedSensor* dest, uint8_t buffer_size, int reset_value = 0) {
     dest->e_counter = 0;
@@ -158,6 +161,9 @@ void update_tft_sensor() {
 }
 
 void update_rpm_sensors() {
+    const bool input_sources_fresh = raw_sensors.rpm_n2 != UINT16_MAX &&
+        raw_sensors.rpm_n3 != UINT16_MAX;
+    bool output_source_fresh = false;
     // INPUT SHAFT CALCULATION
     uint16_t calc_rpm = UINT16_MAX;
     add_to_smoothed_sensor(&smoothed_sensor_n2_rpm, raw_sensors.rpm_n2);
@@ -165,11 +171,23 @@ void update_rpm_sensors() {
     
     // OUTPUT SHAFT RPM CALCULATION
     if (Sensors::using_dedicated_output_rpm()) {
+        RATIO_SAMPLE_EPOCH += 1;
         add_to_smoothed_sensor(&smoothed_sensor_out_rpm, raw_sensors.rpm_out);
+        output_source_fresh = raw_sensors.rpm_out != UINT16_MAX;
     } else {
         // Poll CANBUS
-        add_to_onepoll_sensor(&onepoll_rl_speed, egs_can_hal->get_rear_left_wheel(100));
-        add_to_onepoll_sensor(&onepoll_rr_speed, egs_can_hal->get_rear_right_wheel(100));
+        const uint32_t rear_wheel_sample_epoch = egs_can_hal->get_rear_wheel_sample_epoch();
+        const bool new_rear_wheel_sample = rear_wheel_sample_epoch != LAST_REAR_WHEEL_SAMPLE_EPOCH;
+        if (new_rear_wheel_sample) {
+            LAST_REAR_WHEEL_SAMPLE_EPOCH = rear_wheel_sample_epoch;
+            RATIO_SAMPLE_EPOCH += 1;
+        }
+        const uint16_t fresh_rl = egs_can_hal->get_rear_left_wheel(40);
+        const uint16_t fresh_rr = egs_can_hal->get_rear_right_wheel(40);
+        output_source_fresh = new_rear_wheel_sample &&
+            (fresh_rl != UINT16_MAX || fresh_rr != UINT16_MAX);
+        add_to_onepoll_sensor(&onepoll_rl_speed, fresh_rl);
+        add_to_onepoll_sensor(&onepoll_rr_speed, fresh_rr);
         uint16_t rl = TCUIO::wheel_rl_2x_rpm();
         uint16_t rr = TCUIO::wheel_rr_2x_rpm();
         calc_rpm = UINT16_MAX;
@@ -233,6 +251,7 @@ void update_rpm_sensors() {
         }
         add_to_smoothed_sensor(&smoothed_sensor_out_rpm, calc_rpm);
     }
+    RATIO_FEEDBACK_FRESH = input_sources_fresh && output_source_fresh;
 }
 
 void update_can_values() {
@@ -289,6 +308,9 @@ uint16_t TCUIO::n3_rpm() {
 uint16_t TCUIO::output_rpm() {
     return get_smoothed_sensor_val_unsigned(&smoothed_sensor_out_rpm, 0); 
 }
+
+bool TCUIO::ratio_feedback_fresh() { return RATIO_FEEDBACK_FRESH; }
+uint32_t TCUIO::ratio_sample_epoch() { return RATIO_SAMPLE_EPOCH; }
 
 uint16_t TCUIO::wheel_fl_2x_rpm() { return get_onepoll_sensor_val(&onepoll_fl_speed, 2); }
 uint16_t TCUIO::wheel_fr_2x_rpm() { return get_onepoll_sensor_val(&onepoll_fr_speed, 2); }

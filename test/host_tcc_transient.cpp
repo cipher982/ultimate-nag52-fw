@@ -12,6 +12,7 @@ static void assert_shift_trace(uint8_t source_gear, uint8_t destination_gear) {
     TccShiftGuard guard;
     TccTransientController controller;
     uint32_t now = 0;
+    uint32_t ratio_epoch = 0;
 
     controller.select_gear(source_gear);
     if (source_gear >= 2) {
@@ -24,14 +25,14 @@ static void assert_shift_trace(uint8_t source_gear, uint8_t destination_gear) {
 
     // Internal shift active: command must be exactly zero regardless of the
     // prior gear's controller pressure.
-    auto reason = guard.step(now, true, true, false, 1000);
+    auto reason = guard.step(now, true, true, false, 1000, ++ratio_epoch);
     assert(reason == TccTransientReason::ShiftInhibit);
     assert(controller.step(in(true, true, true, 300, 50, 1344, now)).pressure == 0);
     now += TccTransientCalibration::kCycleMs;
 
     // The local shift algorithm may have ended, but actual/target mismatch
     // continues to hold the converter open.
-    reason = guard.step(now, false, true, true, 300);
+    reason = guard.step(now, false, true, true, 300, ++ratio_epoch);
     assert(reason == TccTransientReason::GearMismatch);
     assert(controller.step(in(true, true, true, 300, 50, 1344, now)).pressure == 0);
     now += TccTransientCalibration::kCycleMs;
@@ -40,12 +41,12 @@ static void assert_shift_trace(uint8_t source_gear, uint8_t destination_gear) {
     // the minimum time resets stability confirmation rather than releasing.
     controller.select_gear(destination_gear);
     const uint32_t commit_ms = now;
-    reason = guard.step(now, false, false, true, 300);
+    reason = guard.step(now, false, false, true, 300, ++ratio_epoch);
     assert(reason == TccTransientReason::PostShiftSettling);
     assert(controller.step(in(true, true, true, 300, 50, 1344, now)).pressure == 0);
     while (now - commit_ms < (uint32_t)TccTransientCalibration::kPostShiftMinSettleMs) {
         now += TccTransientCalibration::kCycleMs;
-        reason = guard.step(now, false, false, true, 300);
+        reason = guard.step(now, false, false, true, 300, ++ratio_epoch);
         assert(reason == TccTransientReason::PostShiftSettling);
         assert(controller.step(in(true, true, true, 300, 50, 1344, now)).pressure == 0);
     }
@@ -54,7 +55,7 @@ static void assert_shift_trace(uint8_t source_gear, uint8_t destination_gear) {
     // remain hard-open; the fifth releases into a 100 mbar Fill step.
     for (int stable = 1; stable <= TccTransientCalibration::kPostShiftStableCycles; ++stable) {
         now += TccTransientCalibration::kCycleMs;
-        reason = guard.step(now, false, false, true, 20);
+        reason = guard.step(now, false, false, true, 20, ++ratio_epoch);
         if (stable < TccTransientCalibration::kPostShiftStableCycles) {
             assert(reason == TccTransientReason::PostShiftSettling);
             assert(controller.step(in(true, true, true, 300, 50, 1344, now)).pressure == 0);
@@ -78,29 +79,38 @@ int main() {
 
     // With no observed shift lifecycle, normal same-gear control is released.
     TccShiftGuard guard;
-    assert(guard.step(0x90000000U, false, false, true, 0) == TccTransientReason::None);
+    uint32_t ratio_epoch = 0;
+    assert(guard.step(0x90000000U, false, false, true, 0, ++ratio_epoch) == TccTransientReason::None);
     guard.reset();
 
     // Settling is state-based, not a timer-only release. Missing, implausible,
     // or interrupted ratio samples hold zero indefinitely. Unsigned elapsed
     // arithmetic also remains correct through the millisecond counter wrap.
     const uint32_t near_wrap = UINT32_MAX - 40U;
-    assert(guard.step(near_wrap, true, true, false, 1000) == TccTransientReason::ShiftInhibit);
-    assert(guard.step(near_wrap + 20U, false, false, false, 0) == TccTransientReason::PostShiftSettling);
+    assert(guard.step(near_wrap, true, true, false, 1000, ++ratio_epoch) == TccTransientReason::ShiftInhibit);
+    assert(guard.step(near_wrap + 20U, false, false, false, 0, ++ratio_epoch) == TccTransientReason::PostShiftSettling);
     uint32_t wrapped_now = near_wrap + 20U;
     for (int i = 0; i < 20; ++i) {
         wrapped_now += TccTransientCalibration::kCycleMs;
-        assert(guard.step(wrapped_now, false, false, false, 0) == TccTransientReason::PostShiftSettling);
+        assert(guard.step(wrapped_now, false, false, false, 0, ++ratio_epoch) == TccTransientReason::PostShiftSettling);
     }
     for (int i = 0; i < 3; ++i) {
         wrapped_now += TccTransientCalibration::kCycleMs;
-        assert(guard.step(wrapped_now, false, false, true, 80) == TccTransientReason::PostShiftSettling);
+        assert(guard.step(wrapped_now, false, false, true, 80, ++ratio_epoch) == TccTransientReason::PostShiftSettling);
+    }
+    // Re-reading the same source epoch cannot finish confirmation even when
+    // the cached value remains plausible.
+    const uint32_t frozen_epoch = ratio_epoch;
+    for (int i = 0; i < 10; ++i) {
+        wrapped_now += TccTransientCalibration::kCycleMs;
+        assert(guard.step(wrapped_now, false, false, true, 80, frozen_epoch) ==
+            TccTransientReason::PostShiftSettling);
     }
     wrapped_now += TccTransientCalibration::kCycleMs;
-    assert(guard.step(wrapped_now, false, false, true, 81) == TccTransientReason::PostShiftSettling);
+    assert(guard.step(wrapped_now, false, false, true, 81, ++ratio_epoch) == TccTransientReason::PostShiftSettling);
     for (int i = 1; i <= TccTransientCalibration::kPostShiftStableCycles; ++i) {
         wrapped_now += TccTransientCalibration::kCycleMs;
-        const auto settle_reason = guard.step(wrapped_now, false, false, true, 80);
+        const auto settle_reason = guard.step(wrapped_now, false, false, true, 80, ++ratio_epoch);
         assert(settle_reason == (i == TccTransientCalibration::kPostShiftStableCycles
             ? TccTransientReason::None : TccTransientReason::PostShiftSettling));
     }
@@ -177,16 +187,18 @@ int main() {
     }
     assert(saw_negative_feedback);
 
-    // Being inside the target band is valid contact evidence, but one noisy
-    // sample may not promote Fill to SlipControl. It needs the same three
-    // confirming cycles as cumulative slip drop.
+    // Merely starting inside the target band is not evidence that commanded
+    // pressure caused clutch contact. With no pressure-correlated slip drop,
+    // the controller remains at the conservative Fill cap indefinitely.
     c.reset();
     auto band_glitch = c.step(in(true, false, true, 95, 89, 1344, 0));
     assert(band_glitch.state == TccTransientState::Fill && !band_glitch.contact_detected);
-    auto band_second = c.step(in(true, false, true, 94, 89, 1344, 20));
-    assert(band_second.state == TccTransientState::Fill && !band_second.contact_detected);
-    auto band_contact = c.step(in(true, false, true, 93, 89, 1344, 40));
-    assert(band_contact.state == TccTransientState::SlipControl && band_contact.contact_detected);
+    for (int i = 1; i < 20; ++i) {
+        auto band_only = c.step(in(true, false, true, 95, 89, 1344, i * 20));
+        assert(band_only.state == TccTransientState::Fill);
+        assert(!band_only.contact_detected);
+        assert(band_only.pressure <= TccTransientCalibration::kContactSearchPressure);
+    }
 
     // Slip is a magnitude, including through contact detection.
     c.reset();
