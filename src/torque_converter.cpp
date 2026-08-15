@@ -58,6 +58,22 @@ TorqueConverter::TorqueConverter(uint16_t max_gb_rating)  {
 void TorqueConverter::diag_toggle_tcc_sol(bool en) {
     ESP_LOGI("TCC", "Diag request to set TCC control to %d", en);
     this->tcc_solenoid_enabled = en;
+    if (!en) {
+        this->reset_transient_state();
+    }
+}
+
+void TorqueConverter::reset_transient_state() {
+    this->transient_controller.reset();
+    this->shift_guard.reset();
+    this->transient_snapshot = {TccTransientState::Open, TccTransientReason::None, 0, 0, 0, 0, 0, 0, false};
+    this->tcc_commanded_pressure = 0;
+    this->current_tcc_state = InternalTccState::Open;
+    this->target_tcc_state = InternalTccState::Open;
+    this->slip_target = SLIP_V_WHEN_OPEN;
+    this->prefill_done = false;
+    this->prefill_running = false;
+    this->prefill_cycles = 0;
 }
 
 void set_adapt_cell(int16_t* dest, GearboxGear gear, uint8_t load_idx, int16_t offset) {
@@ -87,7 +103,7 @@ void TorqueConverter::calc_pid_score() {
 
 }
 
-void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, PressureManager* pm, AbstractProfile* profile, SensorData* sensors, bool gearbox_shift_active) {
+void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, PressureManager* pm, AbstractProfile* profile, SensorData* sensors, bool gearbox_shift_active, bool engine_speed_fresh) {
     int slip_now = abs((int32_t)sensors->engine_rpm-(int32_t)sensors->input_rpm);
     int motor_torque = sensors->converted_torque;
     int load_as_percent = abs(((int)motor_torque*100) / this->rated_max_torque);
@@ -110,13 +126,8 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
         !this->tcc_solenoid_enabled || // Diagnostic request
         !init_tables_ok // Some data was not initialized or invalid
     ) {
-        this->tcc_commanded_pressure = 0;
+        this->reset_transient_state();
         pm->set_target_tcc_pressure(this->tcc_commanded_pressure);
-        this->current_tcc_state = InternalTccState::Open;
-        this->target_tcc_state = InternalTccState::Open;
-        this->slip_target = SLIP_V_WHEN_OPEN;
-        this->prefill_done = false;
-        this->prefill_running = false;
         return;
     }
 
@@ -138,7 +149,7 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
     InternalTccState targ = InternalTccState::Open;
     int slipping_rpm_targ = SLIP_V_WHEN_OPEN;
 
-    bool can_enable_tcc = sensors->atf_temp > -10 && sensors->input_rpm > rpm_map_y_headers[0];
+    bool can_enable_tcc = engine_speed_fresh && sensors->atf_temp > -10 && sensors->input_rpm > rpm_map_y_headers[0];
 
     if (
         can_enable_tcc &&
@@ -218,12 +229,8 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
     const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
     const bool gear_mismatch = curr_gear != targ_gear;
     const bool lifecycle_active = gearbox_shift_active || gear_mismatch;
-    if (this->shift_guard_was_active && !lifecycle_active) {
-        this->post_shift_dwell_until = now_ms + TccTransientCalibration::kPostShiftDwellMs;
-    }
-    const bool shift_guard = lifecycle_active || static_cast<int32_t>(now_ms - this->post_shift_dwell_until) < 0;
-    this->shift_guard_was_active = lifecycle_active;
-    if (shift_guard) {
+    const bool shift_guard_active = this->shift_guard.step(now_ms, lifecycle_active);
+    if (shift_guard_active) {
         targ = InternalTccState::Open;
         slipping_rpm_targ = SLIP_V_WHEN_OPEN;
     }
@@ -289,10 +296,8 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
             : this->tcc_slip_map->get_value(load_as_percent, (uint8_t)curr_gear);
         TccTransientInput transient_input = {
             this->target_tcc_state != InternalTccState::Open,
-            shift_guard || engine_forced_open || !can_enable_tcc,
-            gearbox_shift_active,
-            !gear_mismatch,
-            sensors->engine_rpm > 0 && sensors->input_rpm > 0 && sensors->engine_rpm != UINT16_MAX && sensors->input_rpm != UINT16_MAX,
+            shift_guard_active || engine_forced_open || !can_enable_tcc,
+            engine_speed_fresh && sensors->engine_rpm > 0 && sensors->input_rpm > 0 && sensors->engine_rpm != UINT16_MAX && sensors->input_rpm != UINT16_MAX,
             abs((int)sensors->engine_rpm - (int)sensors->input_rpm),
             controller_target_slip,
             base_pressure,
