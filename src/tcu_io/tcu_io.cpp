@@ -29,6 +29,7 @@ TCUIO::OnePollSensor<int16_t> onepoll_motor_oil_temperature;
 SensorDataRaw raw_sensors;
 TransferCaseState last_transfer_case_pos = TransferCaseState::SNA;
 bool block_shifting = false;
+bool RATIO_FEEDBACK_VALID = false;
 bool RATIO_FEEDBACK_FRESH = false;
 uint32_t RATIO_SAMPLE_EPOCH = 0;
 uint32_t LAST_REAR_WHEEL_SAMPLE_EPOCH = 0;
@@ -163,6 +164,7 @@ void update_tft_sensor() {
 void update_rpm_sensors() {
     const bool input_sources_fresh = raw_sensors.rpm_n2 != UINT16_MAX &&
         raw_sensors.rpm_n3 != UINT16_MAX;
+    bool output_source_valid = false;
     bool output_source_fresh = false;
     // INPUT SHAFT CALCULATION
     uint16_t calc_rpm = UINT16_MAX;
@@ -173,7 +175,8 @@ void update_rpm_sensors() {
     if (Sensors::using_dedicated_output_rpm()) {
         RATIO_SAMPLE_EPOCH += 1;
         add_to_smoothed_sensor(&smoothed_sensor_out_rpm, raw_sensors.rpm_out);
-        output_source_fresh = raw_sensors.rpm_out != UINT16_MAX;
+        output_source_valid = raw_sensors.rpm_out != UINT16_MAX;
+        output_source_fresh = output_source_valid;
     } else {
         // Poll CANBUS
         const uint32_t rear_wheel_sample_epoch = egs_can_hal->get_rear_wheel_sample_epoch();
@@ -187,8 +190,8 @@ void update_rpm_sensors() {
         // Both wheel values come from one source frame. Do not let a newly
         // valid side combine with OnePollSensor's cached value for an invalid
         // side and masquerade as a complete new ratio measurement.
-        output_source_fresh = new_rear_wheel_sample &&
-            fresh_rl != UINT16_MAX && fresh_rr != UINT16_MAX;
+        output_source_valid = fresh_rl != UINT16_MAX && fresh_rr != UINT16_MAX;
+        output_source_fresh = new_rear_wheel_sample && output_source_valid;
         add_to_onepoll_sensor(&onepoll_rl_speed, fresh_rl);
         add_to_onepoll_sensor(&onepoll_rr_speed, fresh_rr);
         uint16_t rl = TCUIO::wheel_rl_2x_rpm();
@@ -254,6 +257,7 @@ void update_rpm_sensors() {
         }
         add_to_smoothed_sensor(&smoothed_sensor_out_rpm, calc_rpm);
     }
+    RATIO_FEEDBACK_VALID = input_sources_fresh && output_source_valid;
     RATIO_FEEDBACK_FRESH = input_sources_fresh && output_source_fresh;
 }
 
@@ -312,6 +316,7 @@ uint16_t TCUIO::output_rpm() {
     return get_smoothed_sensor_val_unsigned(&smoothed_sensor_out_rpm, 0); 
 }
 
+bool TCUIO::ratio_feedback_valid() { return RATIO_FEEDBACK_VALID; }
 bool TCUIO::ratio_feedback_fresh() { return RATIO_FEEDBACK_FRESH; }
 uint32_t TCUIO::ratio_sample_epoch() { return RATIO_SAMPLE_EPOCH; }
 

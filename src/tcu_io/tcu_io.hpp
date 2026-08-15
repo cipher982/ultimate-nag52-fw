@@ -67,6 +67,7 @@ namespace TCUIO {
     uint16_t n2_rpm();
     uint16_t n3_rpm();
     uint16_t output_rpm();
+    bool ratio_feedback_valid();
     bool ratio_feedback_fresh();
     uint32_t ratio_sample_epoch();
 

@@ -20,7 +20,7 @@ confirming cycles while pressure is being applied. Merely being inside the
 target band is not contact evidence. The controller then walks a
 target-slip trajectory in either direction by at most 10 RPM per cycle and
 uses bounded proportional feedback without exceeding the existing learned-map
-ceiling.
+ceiling or an independent 2,000 mbar V1 hard ceiling, whichever is lower.
 
 Any active shift, actual/target mismatch, invalid speed, hard-open request, or
 post-shift settling period commands zero immediately. After gear commit, the
@@ -48,7 +48,8 @@ Forward-to-Park/Neutral/Reverse garage transitions explicitly clear the prior
 forward TCC pressure even while `actual_gear` still reports D2-D5.
 Diagnostic-control takeover also latches a pressure-manager inhibit and writes
 zero TCC duty immediately, so a later pressure update cannot restore an old
-hardware command. Selecting a different controlled gear resets pressure,
+hardware command. Diagnostic inhibit is checked before persistent slave mode,
+and diagnostic TCC disable writes zero duty immediately. Selecting a different controlled gear resets pressure,
 contact, and trajectory state, so every D2-D5 reacquisition starts at the first
 100 mbar step rather than inheriting the source gear's state.
 
@@ -72,6 +73,7 @@ D2-D5 controller does not duplicate that state.
 | `kPostShiftRatioErrorRpm` | 80 | turbine RPM maximum error | Directly checks turbine/output synchronization to the committed gear |
 | `kApplySlewPerCycle` | 100 | mbar / 20 ms | Reaches the logged 1,344 mbar ceiling in about 280 ms rather than one tick |
 | `kContactSearchPressure` | 800 | mbar maximum | Below the observed ~1,000 mbar breakaway region; no contact means no further rise |
+| `kMaxCommandPressure` | 2,000 | mbar absolute maximum | Rejects stale/corrupt persisted map cells, including 10,000 mbar |
 | `kDemandReleaseSlewPerCycle` | 400 | mbar / 20 ms | Normal map release only; safety inhibits are immediate zero |
 | `kFeedbackGain` | 4 | mbar / RPM | Small proportional correction, no integral windup |
 | `kFeedbackLimit` | 600 | mbar | Bounds feedback contribution |
