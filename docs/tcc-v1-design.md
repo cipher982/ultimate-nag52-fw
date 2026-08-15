@@ -27,8 +27,10 @@ post-shift settling period commands zero immediately. After gear commit, the
 guard requires at least 100 ms plus five consecutive fresh turbine/output-ratio
 samples within 80 RPM of the destination ratio. A monotonic epoch from the
 underlying rear-wheel CAN frame means repeated reads of one cached frame do not
-count as new samples. There is no timer-only release; an unstable or missing
-ratio remains fail-open. A normal map-driven release is slew limited. Slip is
+count as new samples. Both rear-wheel fields must be valid in that same frame;
+one fresh side cannot be paired with the other side's cached value. There is no
+timer-only release; an unstable or missing ratio remains fail-open. A normal
+map-driven release is slew limited. Slip is
 always treated as a magnitude. The controller has no integral term and
 controlled D2-D5 cycles never enter the legacy adaptation-writing branch. The
 existing diagnostic packet is unchanged;
@@ -42,6 +44,8 @@ and advances the shift guard so a one-tick dropout cannot erase post-shift
 settling.
 Park/Neutral/Reverse, engine stopped or stalled, slave mode,
 diagnostic TCC disable, and map-initialization failure fully reset state.
+Forward-to-Park/Neutral/Reverse garage transitions explicitly clear the prior
+forward TCC pressure even while `actual_gear` still reports D2-D5.
 Diagnostic-control takeover also latches a pressure-manager inhibit and writes
 zero TCC duty immediately, so a later pressure update cannot restore an old
 hardware command. Selecting a different controlled gear resets pressure,
