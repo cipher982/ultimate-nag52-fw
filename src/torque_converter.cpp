@@ -103,7 +103,10 @@ void TorqueConverter::calc_pid_score() {
 
 }
 
-void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, PressureManager* pm, AbstractProfile* profile, SensorData* sensors, bool gearbox_shift_active, bool engine_speed_fresh) {
+void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
+    PressureManager* pm, AbstractProfile* profile, SensorData* sensors,
+    bool gearbox_shift_active, bool engine_speed_fresh, bool ratio_sample_valid,
+    int ratio_error_rpm) {
     int slip_now = abs((int32_t)sensors->engine_rpm-(int32_t)sensors->input_rpm);
     int motor_torque = sensors->converted_torque;
     int load_as_percent = abs(((int)motor_torque*100) / this->rated_max_torque);
@@ -152,14 +155,14 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
 
     bool can_enable_tcc = engine_speed_fresh && sensors->atf_temp > -10 && sensors->input_rpm > rpm_map_y_headers[0];
 
-    if (
-        can_enable_tcc &&
-        ((cmp_gear == GearboxGear::First && TCC_CURRENT_SETTINGS.enable_d1)||
-        (cmp_gear == GearboxGear::Second && TCC_CURRENT_SETTINGS.enable_d2)||
+    const bool gear_tcc_enabled =
+        (cmp_gear == GearboxGear::First && TCC_CURRENT_SETTINGS.enable_d1) ||
+        (cmp_gear == GearboxGear::Second && TCC_CURRENT_SETTINGS.enable_d2) ||
         (cmp_gear == GearboxGear::Third && TCC_CURRENT_SETTINGS.enable_d3) ||
-        (cmp_gear == GearboxGear::Fourth && TCC_CURRENT_SETTINGS.enable_d4)||
-        (cmp_gear == GearboxGear::Fifth && TCC_CURRENT_SETTINGS.enable_d5))
-    ) {
+        (cmp_gear == GearboxGear::Fourth && TCC_CURRENT_SETTINGS.enable_d4) ||
+        (cmp_gear == GearboxGear::Fifth && TCC_CURRENT_SETTINGS.enable_d5);
+
+    if (can_enable_tcc && gear_tcc_enabled) {
         // See if we should slip or close based on maps
         targ = InternalTccState::Open;
         int pedal_as_percent = (sensors->pedal_pos*100)/250;
@@ -229,8 +232,14 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
     // Variable set
     const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
     const bool gear_mismatch = curr_gear != targ_gear;
-    const bool lifecycle_active = gearbox_shift_active || gear_mismatch;
-    const bool shift_guard_active = this->shift_guard.step(now_ms, lifecycle_active);
+    const TccTransientReason shift_guard_reason = this->shift_guard.step(
+        now_ms,
+        gearbox_shift_active,
+        gear_mismatch,
+        ratio_sample_valid,
+        ratio_error_rpm
+    );
+    const bool shift_guard_active = shift_guard_reason != TccTransientReason::None;
     if (shift_guard_active) {
         targ = InternalTccState::Open;
         slipping_rpm_targ = SLIP_V_WHEN_OPEN;
@@ -289,9 +298,13 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
             load_cell = 12;
         }
     }
-    const bool d2_transient = tcc_transient_applies_to_gear((uint8_t)curr_gear, TCC_CURRENT_SETTINGS.enable_d2);
+    const bool controlled_transient = tcc_transient_applies_to_gear(
+        (uint8_t)curr_gear,
+        gear_tcc_enabled
+    );
     bool transient_handled = false;
-    if (d2_transient) {
+    if (controlled_transient) {
+        this->transient_controller.select_gear((uint8_t)curr_gear);
         const int base_pressure = this->target_tcc_state == InternalTccState::Closed
             ? this->tcc_lock_map->get_value(load_as_percent, (uint8_t)curr_gear)
             : this->tcc_slip_map->get_value(load_as_percent, (uint8_t)curr_gear);
@@ -305,18 +318,23 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
             now_ms,
         };
         this->transient_snapshot = this->transient_controller.step(transient_input);
+        if (shift_guard_active) {
+            this->transient_snapshot.reason = shift_guard_reason;
+        }
         this->tcc_commanded_pressure = this->transient_snapshot.pressure;
         this->current_tcc_state = this->transient_snapshot.state == TccTransientState::Locked
             ? InternalTccState::Closed
             : (this->transient_snapshot.state == TccTransientState::Open || this->transient_snapshot.state == TccTransientState::ReleaseFault
                 ? InternalTccState::Open : InternalTccState::Slipping);
         transient_handled = true;
+    } else {
+        // D1 retains the legacy path. Clear the common D2-D5 controller so a
+        // later controlled gear cannot inherit pressure or contact state.
+        this->transient_controller.reset();
     }
-    // Freeze D2 adaptation for the first controlled A/B candidate. The
-    // transient controller deliberately uses the preserved learned maps as
-    // read-only ceilings so the vehicle test cannot rewrite its own baseline.
-    // Prefilling when suddenly increasing state requested. D2 is handled above;
-    // this legacy path intentionally remains unchanged for D1 and D3-D5.
+    // Freeze adaptation in every common-controller gear for the first A/B.
+    // Preserved learned maps remain read-only per-gear feed-forward ceilings.
+    // D1 alone retains the legacy prefill/adaptation path.
     if (!transient_handled && this->target_tcc_state > this->current_tcc_state && this->tcc_actual_pressure/100 < 100 && !prefill_done) {
         // Prefill logic
         if (false == prefill_running) {

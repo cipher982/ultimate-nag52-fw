@@ -6,7 +6,9 @@
 // Provisional V1 limits. Units are mbar, RPM, and milliseconds.
 namespace TccTransientCalibration {
 constexpr int kCycleMs = 20;
-constexpr int kPostShiftDwellMs = 300;
+constexpr int kPostShiftMinSettleMs = 100;
+constexpr int kPostShiftStableCycles = 5;
+constexpr int kPostShiftRatioErrorRpm = 80;
 constexpr int kApplySlewPerCycle = 100;
 constexpr int kDemandReleaseSlewPerCycle = 400;
 constexpr int kFeedbackGain = 4;
@@ -20,8 +22,8 @@ constexpr int kTargetSlipSlewPerCycle = 10;
 constexpr int kLockSlipBand = 12;
 }
 
-inline bool tcc_transient_applies_to_gear(uint8_t gear, bool d2_enabled) {
-    return d2_enabled && gear == 2;
+inline bool tcc_transient_applies_to_gear(uint8_t gear, bool gear_enabled) {
+    return gear_enabled && gear >= 2 && gear <= 5;
 }
 
 enum class TccTransientState : uint8_t {
@@ -37,7 +39,7 @@ enum class TccTransientReason : uint8_t {
     DemandOpen = 1,
     ShiftInhibit = 2,
     GearMismatch = 3,
-    PostShiftDwell = 4,
+    PostShiftSettling = 4,
     InvalidSpeed = 5,
     TargetHysteresis = 6,
     InvalidPressure = 7,
@@ -55,13 +57,15 @@ struct TccTransientInput {
 
 class TccShiftGuard {
 public:
-    bool step(uint32_t now_ms, bool lifecycle_active);
+    TccTransientReason step(uint32_t now_ms, bool gearbox_shift_active,
+        bool gear_mismatch, bool ratio_sample_valid, int ratio_error_rpm);
     void reset();
 
 private:
     bool lifecycle_was_active_ = false;
-    bool dwell_active_ = false;
-    uint32_t dwell_until_ms_ = 0;
+    bool settling_active_ = false;
+    uint32_t settle_started_ms_ = 0;
+    int stable_ratio_cycles_ = 0;
 };
 
 struct TccTransientOutput {
@@ -80,9 +84,11 @@ class TccTransientController {
 public:
     TccTransientOutput step(const TccTransientInput& input);
     bool active() const { return state_ != TccTransientState::Open; }
+    void select_gear(uint8_t gear);
     void reset();
 
 private:
+    void reset_control_state();
     TccTransientState state_ = TccTransientState::Open;
     TccTransientReason reason_ = TccTransientReason::None;
     int pressure_ = 0;
@@ -91,6 +97,7 @@ private:
     int trajectory_slip_rpm_ = 0;
     int contact_confirm_cycles_ = 0;
     bool contact_detected_ = false;
+    uint8_t selected_gear_ = 0xFF;
 };
 
 #endif

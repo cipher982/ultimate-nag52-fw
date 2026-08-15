@@ -3,18 +3,18 @@
 ## Scope and requirements
 
 This candidate starts at installed commit `f9ea309473d3ec6ebc130c529eaf050162119137`.
-It changes stable D2 Open-to-apply behavior and adds a gearbox-lifetime TCC
-inhibit with post-shift dwell. D1 configuration semantics remain unchanged;
-D3-D5 stable map behavior remains unchanged except for the shared shift safety
-interlock. This is an offline engineering candidate, not a vehicle-flash
+It replaces legacy TCC application in every enabled D2-D5 gear with one bounded
+controller and adds a gearbox-lifetime TCC inhibit followed by measured
+post-shift ratio settling. D1 configuration semantics and its legacy path remain
+unchanged. This is an offline engineering candidate, not a vehicle-flash
 authorization.
 
 ## Architecture and invariants
 
 `TccTransientController` has Open, Fill, SlipControl, Locked, and
 ReleaseFault states. Fill rises by at most 100 mbar per 20 ms to a conservative
-800 mbar contact-search cap, never directly to the learned D2 map value; the
-configured 10,000 mbar prefill is not used. SlipControl starts only after
+800 mbar contact-search cap, never directly to the learned per-gear map value;
+the configured 10,000 mbar prefill is not used. SlipControl starts only after
 measured slip falls at least 25 RPM from the fill-entry value for three
 confirming cycles. Being inside the target band is alternate evidence, but it
 also requires three confirming cycles. The controller then walks a
@@ -23,19 +23,24 @@ uses bounded proportional feedback without exceeding the existing learned-map
 ceiling.
 
 Any active shift, actual/target mismatch, invalid speed, hard-open request, or
-post-shift dwell commands zero immediately. A normal map-driven release is
+post-shift settling period commands zero immediately. After gear commit, the
+guard requires at least 100 ms plus five consecutive fresh turbine/output-ratio
+samples within 80 RPM of the destination ratio. There is no timer-only release;
+an unstable or missing ratio remains fail-open. A normal map-driven release is
 slew limited. Slip is always treated as a magnitude. The controller has no
-integral term and transient cycles never enter the legacy adaptation-writing
-branch. The existing diagnostic packet is unchanged; `get_transient_snapshot()`
-is an internal trace seam for a later safe protocol extension.
+integral term and controlled D2-D5 cycles never enter the legacy
+adaptation-writing branch. The existing diagnostic packet is unchanged;
+`get_transient_snapshot()` is an internal trace seam for a later safe protocol
+extension.
 
 The gearbox now passes whether the current engine-RPM read was fresh instead of
 silently treating its cached fallback as live TCC feedback. Invalid physical
 shaft data bypasses `update()` but explicitly resets transient state first.
 Park/Neutral/Reverse, engine stopped or stalled, slave mode,
 diagnostic-control takeover, diagnostic TCC disable, and map-initialization
-failure do the same. Re-entering D2 therefore starts at the first 100 mbar
-step rather than restoring a frozen command.
+failure do the same. Selecting a different controlled gear resets pressure,
+contact, and trajectory state, so every D2-D5 reacquisition starts at the first
+100 mbar step rather than inheriting the source gear's state.
 
 ## State transitions
 
@@ -43,16 +48,18 @@ Open -> Fill occurs only when the map requests at most 90 RPM slip. Once an
 application is active it remains eligible until the map exceeds 110 RPM,
 providing Open/Slipping hysteresis. Fill -> SlipControl requires the measured
 contact evidence above. SlipControl -> Locked occurs within the lock band. Any
-shift/mismatch, invalid speed, hard-open request, or dwell enters Open or
-ReleaseFault at zero command. One shared `TccShiftGuard` owns the complete
-gearbox lifecycle and 300 ms post-commit dwell for every gear; the D2 controller
-does not duplicate that timing state.
+shift/mismatch, invalid speed, hard-open request, or ratio-settling period enters
+Open or ReleaseFault at zero command. One shared `TccShiftGuard` owns the
+complete gearbox lifecycle and stable-ratio release for every gear; the common
+D2-D5 controller does not duplicate that state.
 
 ## Calibration table
 
 | Constant | Value | Units / bounds | Rationale |
 |---|---:|---|---|
-| `kPostShiftDwellMs` | 300 | ms, >= 0 | Covers the measured early reapply window; provisional |
+| `kPostShiftMinSettleMs` | 100 | ms minimum | Rejects immediate release on the first apparently committed sample |
+| `kPostShiftStableCycles` | 5 | consecutive 20 ms samples | Requires 100 ms of continuously plausible destination ratio |
+| `kPostShiftRatioErrorRpm` | 80 | turbine RPM maximum error | Directly checks turbine/output synchronization to the committed gear |
 | `kApplySlewPerCycle` | 100 | mbar / 20 ms | Reaches the logged 1,344 mbar ceiling in about 280 ms rather than one tick |
 | `kContactSearchPressure` | 800 | mbar maximum | Below the observed ~1,000 mbar breakaway region; no contact means no further rise |
 | `kDemandReleaseSlewPerCycle` | 400 | mbar / 20 ms | Normal map release only; safety inhibits are immediate zero |
@@ -71,12 +78,15 @@ offline testing, not claimed final vehicle calibration.
 `test/host_tcc_transient.cpp` covers the August 15 331->285 RPM fixture shape,
 target hysteresis, magnitude handling, measured-contact transition, target
 trajectory and undershoot feedback, a pressured shift interruption, early
-callback end with actual/target mismatch, post-shift dwell, invalid speed,
-hard-open behavior, no-contact pressure cap, one-sample target-band rejection,
-negative-slip contact, state reset and garage/stall D2 re-entry, map-pressure
-ceiling, and slew. The source-level
-integration keeps D3-D5 on the existing path; the full firmware build is the
-regression check for that unchanged code path.
+callback end with actual/target mismatch, post-shift ratio settling, invalid
+and unstable ratio samples, invalid speed, hard-open behavior, no-contact
+pressure cap, one-sample target-band rejection,
+negative-slip contact, state reset and garage/stall re-entry, map-pressure
+ceiling, and slew. Scripted traces cover 1->2, 2->3, 3->4, 4->5, 5->4, 4->3,
+and 3->2. They prove source-gear pressure goes immediately to zero, gear
+mismatch remains inhibited, five stable destination-ratio samples are required,
+and destination reacquisition starts at 100 mbar without a legacy 10,000 mbar
+fallthrough. The full firmware build checks the real integration signatures.
 
 Run the mandatory host gate with `sh scripts/test_tcc_transient.sh` before the
 full `unified` PlatformIO build. This test is intentionally host-native so the
@@ -84,18 +94,19 @@ pure controller and shift guard run without ESP32 hardware.
 
 ## Integration, rollback, and risks
 
-The unchanged KWP diagnostics packet is intentional for V1. D2 adaptation is
+The unchanged KWP diagnostics packet is intentional for V1. D2-D5 adaptation is
 intentionally frozen for the complete first A/B candidate: the preserved
-learned D2 maps are read-only feed-forward ceilings. This isolates the new
-controller and prevents a short validation drive from changing its own
+learned per-gear maps are read-only feed-forward ceilings. This isolates the
+new controller and prevents a short validation drive from changing its own
 baseline. Restoring adaptation is a separate post-validation change, not part
-of this initial flash gate. The internal
-snapshot exposes state, slip, map target, trajectory target, feed-forward,
+of this initial flash gate. The internal snapshot exposes state, slip, map
+target, trajectory target, feed-forward,
 feedback, final pressure, contact, and reason without breaking wire
 compatibility. Rollback is the archived official `f9ea309` image and preserved
 settings/maps. Remaining risks are unknown hydraulic response to the
 provisional pressure law, lack of source-age data in the shared sensor
-structure, and possible interaction between the new D2 path and temperature
-scaling. If a bounded command still causes a shaft snap, restore `f9ea309` and
-inspect TCC hydraulics, damper, solenoid, converter, and driveline causes rather
+structure, provisional ratio/contact thresholds, and possible interaction
+between the common path and temperature scaling. If a bounded command still
+causes a shaft snap, restore `f9ea309` and inspect TCC hydraulics,
+damper/regulator hydraulics, solenoid, converter, and driveline causes rather
 than increasing pressure constants.
