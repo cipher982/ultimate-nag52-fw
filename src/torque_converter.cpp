@@ -9,6 +9,7 @@
 #include "common_structs_ops.h"
 #include "egs_calibration/calibration_structs.h"
 #include "tcc_adaptation.h"
+#include "esp_timer.h"
 
 #define LOAD_SIZE TCC_SLIP_ADAPT_MAP_SIZE/5
 
@@ -86,7 +87,7 @@ void TorqueConverter::calc_pid_score() {
 
 }
 
-void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, PressureManager* pm, AbstractProfile* profile, SensorData* sensors) {
+void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, PressureManager* pm, AbstractProfile* profile, SensorData* sensors, bool gearbox_shift_active) {
     int slip_now = abs((int32_t)sensors->engine_rpm-(int32_t)sensors->input_rpm);
     int motor_torque = sensors->converted_torque;
     int load_as_percent = abs(((int)motor_torque*100) / this->rated_max_torque);
@@ -213,6 +214,18 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
         }
     }
     // Variable set
+    const uint32_t now_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    const bool gear_mismatch = curr_gear != targ_gear;
+    const bool lifecycle_active = gearbox_shift_active || gear_mismatch;
+    if (this->shift_guard_was_active && !lifecycle_active) {
+        this->post_shift_dwell_until = now_ms + TccTransientCalibration::kPostShiftDwellMs;
+    }
+    const bool shift_guard = lifecycle_active || static_cast<int32_t>(now_ms - this->post_shift_dwell_until) < 0;
+    this->shift_guard_was_active = lifecycle_active;
+    if (shift_guard) {
+        targ = InternalTccState::Open;
+        slipping_rpm_targ = SLIP_V_WHEN_OPEN;
+    }
     this->target_tcc_state = targ;
     this->slip_target = MIN(slipping_rpm_targ, SLIP_V_WHEN_OPEN);
 
@@ -266,8 +279,35 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
             load_cell = 12;
         }
     }
-    // Prefilling when suddenly increasing state requested
-    if (this->target_tcc_state > this->current_tcc_state && this->tcc_actual_pressure/100 < 100 && !prefill_done) {
+    const bool d2_transient = tcc_transient_applies_to_gear((uint8_t)curr_gear, TCC_CURRENT_SETTINGS.enable_d2);
+    bool transient_handled = false;
+    if (d2_transient) {
+        const int base_pressure = this->target_tcc_state == InternalTccState::Closed
+            ? this->tcc_lock_map->get_value(load_as_percent, (uint8_t)curr_gear)
+            : this->tcc_slip_map->get_value(load_as_percent, (uint8_t)curr_gear);
+        TccTransientInput transient_input = {
+            this->target_tcc_state != InternalTccState::Open,
+            gearbox_shift_active,
+            !gear_mismatch,
+            sensors->engine_rpm > 0 && sensors->input_rpm > 0 && sensors->engine_rpm != UINT16_MAX && sensors->input_rpm != UINT16_MAX,
+            true, // SensorData has no source-age field; freshness is documented as an integration gap.
+            (int)sensors->engine_rpm - (int)sensors->input_rpm,
+            this->slip_target,
+            base_pressure,
+            TCC_CURRENT_SETTINGS.prefill_pressure,
+            now_ms,
+        };
+        this->transient_snapshot = this->transient_controller.step(transient_input);
+        this->tcc_commanded_pressure = this->transient_snapshot.pressure;
+        this->current_tcc_state = this->transient_snapshot.state == TccTransientState::Locked
+            ? InternalTccState::Closed
+            : (this->transient_snapshot.state == TccTransientState::Open || this->transient_snapshot.state == TccTransientState::ReleaseFault
+                ? InternalTccState::Open : InternalTccState::Slipping);
+        transient_handled = true;
+    }
+    // Prefilling when suddenly increasing state requested. D2 is handled above;
+    // this legacy path intentionally remains unchanged for D1 and D3-D5.
+    if (!transient_handled && this->target_tcc_state > this->current_tcc_state && this->tcc_actual_pressure/100 < 100 && !prefill_done) {
         // Prefill logic
         if (false == prefill_running) {
             // Var setup (Start of prefill)
@@ -282,7 +322,7 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
             prefill_done = true;
         }
         this->tcc_commanded_pressure = TCC_CURRENT_SETTINGS.prefill_pressure;
-    } else {
+    } else if (!transient_handled) {
         int slip_adaptation = abs(this->tcc_slip_filtered/100);
         // Constant logic
         if (this->target_tcc_state == InternalTccState::Open) {
@@ -329,12 +369,12 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
             this->tcc_commanded_pressure = this->tcc_lock_map->get_value(load_as_percent, (uint8_t)curr_gear);
         }
     }
-    if (!is_shifting && was_shifting) {
+    if (!transient_handled && !is_shifting && was_shifting) {
         was_shifting = false;
     }
 
     // Pressure achieved.
-    if (abs(this->tcc_commanded_pressure-this->tcc_actual_pressure/100) < 1) {
+    if (!transient_handled && abs(this->tcc_commanded_pressure-this->tcc_actual_pressure/100) < 1) {
         this->current_tcc_state = this->target_tcc_state;
     }
     // Reset prefill info when we go to 0 pressure
