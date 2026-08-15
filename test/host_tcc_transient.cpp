@@ -154,23 +154,28 @@ int main() {
     auto opened = c.step(in(false, false, true, 320, 111, 1344, 60));
     assert(opened.state == TccTransientState::Open && opened.pressure < held_apply.pressure);
 
-    // No contact means no command above the conservative 800 mbar search cap,
-    // even when the learned map is the logged 1,344 mbar.
+    // Without rate-confirmed contact, search creeps above the initial 800 mbar
+    // level but never exceeds the learned map, then latches open at timeout.
     c.reset();
-    for (int i = 0; i < 30; ++i) {
+    for (int i = 0; i < 150; ++i) {
         auto out = c.step(in(true, false, true, 331, 89, 1344, i * 20));
         assert(out.state == TccTransientState::Fill);
         assert(!out.contact_detected);
-        assert(out.pressure <= TccTransientCalibration::kContactSearchPressure);
+        assert(out.pressure <= 1344);
     }
+    auto contact_timeout = c.step(in(true, false, true, 331, 89, 1344, 3000));
+    assert(contact_timeout.state == TccTransientState::ReleaseFault);
+    assert(contact_timeout.reason == TccTransientReason::ContactNotDetected);
+    assert(contact_timeout.pressure == 0);
+    assert(c.step(in(true, false, true, 331, 89, 1344, 3020)).pressure == 0);
 
     // Persisted map data is untrusted. Even a 10,000 mbar cell cannot command
     // above the independent V1 ceiling after contact.
     c.reset();
     c.step(in(true, false, true, 331, 89, 10000, 0));
-    c.step(in(true, false, true, 285, 89, 10000, 20));
-    c.step(in(true, false, true, 280, 89, 10000, 40));
-    auto capped_contact = c.step(in(true, false, true, 275, 89, 10000, 60));
+    c.step(in(true, false, true, 316, 89, 10000, 20));
+    c.step(in(true, false, true, 301, 89, 10000, 40));
+    auto capped_contact = c.step(in(true, false, true, 286, 89, 10000, 60));
     assert(capped_contact.contact_detected);
     assert(capped_contact.feedforward_pressure == TccTransientCalibration::kMaxCommandPressure);
     bool reached_hard_cap = false;
@@ -183,26 +188,26 @@ int main() {
     }
     assert(reached_hard_cap);
 
-    // August 15 stable-D2 fixture: the original one-sample 331->285 change is
-    // not enough; contact requires three confirming samples, then a bounded
-    // trajectory starts without a 10,000 mbar pulse.
+    // The August 15 logger observed 331->285 across a roughly 100 ms sample.
+    // Interpolate that shape into safe 20 ms controller steps; contact still
+    // requires three confirming samples before the bounded trajectory starts.
     c.reset();
     auto first = c.step(in(true, false, true, 331, 89, 1344, 0));
     assert(first.state == TccTransientState::Fill &&
         first.pressure == TccTransientCalibration::kApplySlewPerCycle);
-    auto drop1 = c.step(in(true, false, true, 285, 89, 1344, 20));
-    auto drop2 = c.step(in(true, false, true, 280, 89, 1344, 40));
-    auto contact = c.step(in(true, false, true, 275, 89, 1344, 60));
+    auto drop1 = c.step(in(true, false, true, 316, 89, 1344, 20));
+    auto drop2 = c.step(in(true, false, true, 301, 89, 1344, 40));
+    auto contact = c.step(in(true, false, true, 286, 89, 1344, 60));
     assert(!drop1.contact_detected && !drop2.contact_detected);
     assert(contact.state == TccTransientState::SlipControl && contact.contact_detected);
     assert(contact.pressure == 4 * TccTransientCalibration::kApplySlewPerCycle &&
-        contact.trajectory_slip_rpm == 275);
+        contact.trajectory_slip_rpm == 286);
     int previous_trajectory = contact.trajectory_slip_rpm;
     int previous_pressure = contact.pressure;
     bool saw_negative_feedback = false;
     for (int i = 4; i < 30; ++i) {
         // Deliberately cross below the trajectory to prove pressure backs off.
-        const int observed_slip = std::max(80, 275 - (i - 3) * 12);
+        const int observed_slip = std::max(80, 286 - (i - 3) * 12);
         auto out = c.step(in(true, false, true, observed_slip, 89, 1344, i * 20));
         assert(out.pressure >= 0 && out.pressure <= 1344);
         const int pressure_delta = out.pressure - previous_pressure;
@@ -216,8 +221,8 @@ int main() {
     assert(saw_negative_feedback);
 
     // Merely starting inside the target band is not evidence that commanded
-    // pressure caused clutch contact. With no pressure-correlated slip drop,
-    // the controller remains at the conservative Fill cap indefinitely.
+    // pressure caused clutch contact. With no rate-confirmed response, the
+    // controller remains in bounded Fill and ultimately times out fail-open.
     c.reset();
     auto band_glitch = c.step(in(true, false, true, 95, 89, 1344, 0));
     assert(band_glitch.state == TccTransientState::Fill && !band_glitch.contact_detected);
@@ -232,20 +237,20 @@ int main() {
     c.reset();
     auto negative_slip = c.step(in(true, false, true, -331, 89, 1344, 0));
     assert(negative_slip.slip_rpm == 331 && negative_slip.state == TccTransientState::Fill);
-    c.step(in(true, false, true, -285, 89, 1344, 20));
-    c.step(in(true, false, true, -280, 89, 1344, 40));
-    assert(c.step(in(true, false, true, -275, 89, 1344, 60)).contact_detected);
+    c.step(in(true, false, true, -316, 89, 1344, 20));
+    c.step(in(true, false, true, -301, 89, 1344, 40));
+    assert(c.step(in(true, false, true, -286, 89, 1344, 60)).contact_detected);
 
     // A pressured application interrupted by the shared shift guard, an engine
     // hard-open request, or invalid speed commands exactly zero in one cycle.
     c.reset();
     c.step(in(true, false, true, 331, 89, 1344, 0));
-    auto pressured = c.step(in(true, false, true, 300, 89, 1344, 20));
+    auto pressured = c.step(in(true, false, true, 301, 89, 1344, 20));
     assert(pressured.pressure > 0);
-    assert(c.step(in(true, true, true, 300, 89, 1344, 40)).pressure == 0);
+    assert(c.step(in(true, true, true, 301, 89, 1344, 40)).pressure == 0);
     c.reset();
     c.step(in(true, false, true, 331, 89, 1344, 0));
-    assert(c.step(in(true, false, false, 300, 89, 1344, 20)).pressure == 0);
+    assert(c.step(in(true, false, false, 301, 89, 1344, 20)).pressure == 0);
 
     // Reset models every gearbox bypass: Park/Neutral, invalid-speed, and
     // diagnostic and engine-stopped bypasses cannot restore the old D2

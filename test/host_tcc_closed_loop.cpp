@@ -16,7 +16,9 @@ struct PlantProfile {
     double clutch_gain_rpm_per_second_per_mbar;
     double hydraulic_tau_ms;
     int hydraulic_delay_cycles;
+    double initial_slip_rpm;
     double free_slip_rpm;
+    double free_slip_ramp_rpm_per_second;
     double free_slip_tau_seconds;
     int feedforward_pressure_mbar;
     bool must_settle;
@@ -36,12 +38,14 @@ struct ScenarioResult {
     int max_negative_rate_correction_mbar = 0;
     int max_pressure_after_rate_fault_mbar = 0;
     bool excessive_rate_fault = false;
+    bool contact_timeout_fault = false;
 };
 
 class SimpleTccPlant {
 public:
-    explicit SimpleTccPlant(const PlantProfile& profile, double initial_slip_rpm)
-        : profile_(profile), slip_rpm_(initial_slip_rpm), delayed_commands_(profile.hydraulic_delay_cycles + 1, 0) {}
+    explicit SimpleTccPlant(const PlantProfile& profile)
+        : profile_(profile), slip_rpm_(profile.initial_slip_rpm),
+          delayed_commands_(profile.hydraulic_delay_cycles + 1, 0) {}
 
     int measured_slip_rpm() const { return (int)std::lround(slip_rpm_); }
 
@@ -54,8 +58,10 @@ public:
             TccTransientCalibration::kCycleMs / profile_.hydraulic_tau_ms);
         hydraulic_pressure_mbar_ += (delayed_command - hydraulic_pressure_mbar_) * hydraulic_fraction;
 
+        const double free_slip_rpm = profile_.free_slip_rpm +
+            profile_.free_slip_ramp_rpm_per_second * elapsed_seconds_;
         const double open_converter_rate =
-            (profile_.free_slip_rpm - slip_rpm_) / profile_.free_slip_tau_seconds;
+            (free_slip_rpm - slip_rpm_) / profile_.free_slip_tau_seconds;
         const double clutch_pressure = std::max(0.0,
             hydraulic_pressure_mbar_ - profile_.contact_pressure_mbar);
         const double clutch_rate = clutch_pressure * profile_.clutch_gain_rpm_per_second_per_mbar;
@@ -65,19 +71,21 @@ public:
         const double slip_rate = open_converter_rate - clutch_direction * clutch_rate;
         slip_rpm_ += slip_rate * (TccTransientCalibration::kCycleMs / 1000.0);
         slip_rpm_ = std::max(-200.0, std::min(1000.0, slip_rpm_));
+        elapsed_seconds_ += TccTransientCalibration::kCycleMs / 1000.0;
     }
 
 private:
     PlantProfile profile_;
     double slip_rpm_;
     double hydraulic_pressure_mbar_ = 0.0;
+    double elapsed_seconds_ = 0.0;
     std::deque<int> delayed_commands_;
 };
 
 ScenarioResult run_apply(const PlantProfile& profile) {
     TccTransientController controller;
     controller.select_gear(2);
-    SimpleTccPlant plant(profile, 260.0);
+    SimpleTccPlant plant(profile);
     ScenarioResult result{profile.name};
     int previous_slip = plant.measured_slip_rpm();
     int previous_pressure = 0;
@@ -106,6 +114,9 @@ ScenarioResult run_apply(const PlantProfile& profile) {
 
         if (output.reason == TccTransientReason::ExcessiveSlipRate) {
             result.excessive_rate_fault = true;
+        }
+        if (output.reason == TccTransientReason::ContactNotDetected) {
+            result.contact_timeout_fault = true;
         }
         if (result.excessive_rate_fault) {
             result.max_pressure_after_rate_fault_mbar = std::max(
@@ -151,7 +162,7 @@ void assert_fault_release() {
     controller.select_gear(2);
     TccTransientOutput output{};
     for (int cycle = 0; cycle < 20; ++cycle) {
-        const int slip = cycle < 5 ? 260 : 220 - cycle * 3;
+        const int slip = 260 - cycle * 3;
         output = controller.step({true, false, true, slip, 50, 1200,
             (uint32_t)(cycle * TccTransientCalibration::kCycleMs)});
     }
@@ -164,8 +175,8 @@ void assert_fault_release() {
     controller.reset();
     controller.select_gear(2);
     controller.step({true, false, true, 260, 50, 1200, 0});
-    controller.step({true, false, true, 230, 50, 1200, 20});
-    controller.step({true, false, true, 230, 50, 1200, 40});
+    controller.step({true, false, true, 250, 50, 1200, 20});
+    controller.step({true, false, true, 240, 50, 1200, 40});
     controller.step({true, false, true, 230, 50, 1200, 60});
     output = controller.step({true, false, true, 190, 50, 1200, 80});
     assert(output.state == TccTransientState::ReleaseFault);
@@ -201,7 +212,9 @@ void assert_parameter_sweep() {
                             clutch_gain,
                             hydraulic_tau_ms,
                             hydraulic_delay,
+                            260.0,
                             300.0,
+                            0.0,
                             0.50,
                             feedforward_pressure,
                             true,
@@ -226,6 +239,18 @@ void assert_parameter_sweep() {
                         } else if (result.excessive_rate_fault) {
                             controlled_aborts += 1;
                         } else {
+                            if (tracking_misses < 4) {
+                                std::cout << "tracking miss contact=" << contact_pressure
+                                          << " gain=" << clutch_gain
+                                          << " tau_ms=" << hydraulic_tau_ms
+                                          << " delay=" << hydraulic_delay
+                                          << " feedforward=" << feedforward_pressure
+                                          << " settle_ms=" << result.settle_cycle *
+                                                TccTransientCalibration::kCycleMs
+                                          << " final_window_error=" <<
+                                                result.max_target_error_last_second_rpm
+                                          << '\n';
+                            }
                             tracking_misses += 1;
                         }
                     }
@@ -247,11 +272,14 @@ void assert_parameter_sweep() {
 
 int main() {
     const std::vector<PlantProfile> profiles = {
-        {"nominal", 700, 3.0, 80, 2, 300, 0.50, 1200, true},
-        {"sharp", 750, 5.0, 40, 1, 300, 0.45, 1300, true},
-        {"soft", 600, 1.5, 120, 3, 300, 0.60, 1100, true},
-        {"cold-slow", 780, 2.0, 160, 4, 320, 0.70, 1400, false},
-        {"contact-above-search-cap", 850, 3.0, 80, 2, 300, 0.50, 1400, false},
+        {"nominal", 700, 3.0, 80, 2, 260, 300, 0, 0.50, 1200, true},
+        {"sharp", 750, 5.0, 40, 1, 260, 300, 0, 0.45, 1300, true},
+        {"soft", 600, 1.5, 120, 3, 260, 300, 0, 0.60, 1100, true},
+        {"cold-slow", 780, 2.0, 160, 4, 260, 320, 0, 0.70, 1400, true},
+        {"contact-above-initial-search", 850, 3.0, 80, 2, 260, 300, 0, 0.50, 1400, true},
+        {"falling-slip-before-contact", 850, 3.0, 80, 2, 243, 243, -35, 0.50, 1400, true},
+        {"true-no-contact", 1500, 3.0, 80, 2, 260, 300, 0, 0.50, 1400, false},
+        {"falling-slip-true-no-contact", 1500, 3.0, 80, 2, 243, 243, -35, 0.50, 1400, false},
     };
 
     for (const auto& profile : profiles) {
@@ -268,6 +296,7 @@ int main() {
                   << " final_window_error=" << result.max_target_error_last_second_rpm
                   << " max_rate_relief=" << result.max_negative_rate_correction_mbar
                   << " rate_fault=" << result.excessive_rate_fault
+                  << " contact_timeout=" << result.contact_timeout_fault
                   << '\n';
 
         assert(result.max_closure_rpm_per_cycle <= 30);
@@ -283,8 +312,8 @@ int main() {
             }
         } else {
             assert(!result.contact_detected);
-            assert(!result.settled);
-            assert(result.max_pressure_mbar == TccTransientCalibration::kContactSearchPressure);
+            assert(result.contact_timeout_fault);
+            assert(result.max_pressure_mbar == profile.feedforward_pressure_mbar);
         }
     }
 
