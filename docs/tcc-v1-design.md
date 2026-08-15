@@ -16,7 +16,8 @@ ReleaseFault states. Fill rises by at most 100 mbar per 20 ms to a conservative
 800 mbar contact-search cap, never directly to the learned D2 map value; the
 configured 10,000 mbar prefill is not used. SlipControl starts only after
 measured slip falls at least 25 RPM from the fill-entry value for three
-confirming cycles (or is already in the target band). It then walks a
+confirming cycles. Being inside the target band is alternate evidence, but it
+also requires three confirming cycles. The controller then walks a
 target-slip trajectory in either direction by at most 10 RPM per cycle and
 uses bounded proportional feedback without exceeding the existing learned-map
 ceiling.
@@ -31,9 +32,10 @@ is an internal trace seam for a later safe protocol extension.
 The gearbox now passes whether the current engine-RPM read was fresh instead of
 silently treating its cached fallback as live TCC feedback. Invalid physical
 shaft data bypasses `update()` but explicitly resets transient state first.
-Park/Neutral/Reverse, slave mode, diagnostic-control takeover, diagnostic TCC
-disable, and map-initialization failure do the same. Re-entering D2 therefore
-starts at the first 100 mbar step rather than restoring a frozen command.
+Park/Neutral/Reverse, engine stopped or stalled, slave mode,
+diagnostic-control takeover, diagnostic TCC disable, and map-initialization
+failure do the same. Re-entering D2 therefore starts at the first 100 mbar
+step rather than restoring a frozen command.
 
 ## State transitions
 
@@ -70,8 +72,9 @@ offline testing, not claimed final vehicle calibration.
 target hysteresis, magnitude handling, measured-contact transition, target
 trajectory and undershoot feedback, a pressured shift interruption, early
 callback end with actual/target mismatch, post-shift dwell, invalid speed,
-hard-open behavior, no-contact pressure cap, negative-slip contact, state reset
-and garage D2 re-entry, map-pressure ceiling, and slew. The source-level
+hard-open behavior, no-contact pressure cap, one-sample target-band rejection,
+negative-slip contact, state reset and garage/stall D2 re-entry, map-pressure
+ceiling, and slew. The source-level
 integration keeps D3-D5 on the existing path; the full firmware build is the
 regression check for that unchanged code path.
 
@@ -81,7 +84,12 @@ pure controller and shift guard run without ESP32 hardware.
 
 ## Integration, rollback, and risks
 
-The unchanged KWP diagnostics packet is intentional for V1. The internal
+The unchanged KWP diagnostics packet is intentional for V1. D2 adaptation is
+intentionally frozen for the complete first A/B candidate: the preserved
+learned D2 maps are read-only feed-forward ceilings. This isolates the new
+controller and prevents a short validation drive from changing its own
+baseline. Restoring adaptation is a separate post-validation change, not part
+of this initial flash gate. The internal
 snapshot exposes state, slip, map target, trajectory target, feed-forward,
 feedback, final pressure, contact, and reason without breaking wire
 compatibility. Rollback is the archived official `f9ea309` image and preserved

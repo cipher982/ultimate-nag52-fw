@@ -78,6 +78,17 @@ int main() {
     }
     assert(saw_negative_feedback);
 
+    // Being inside the target band is valid contact evidence, but one noisy
+    // sample may not promote Fill to SlipControl. It needs the same three
+    // confirming cycles as cumulative slip drop.
+    c.reset();
+    auto band_glitch = c.step(in(true, false, true, 95, 89, 1344, 0));
+    assert(band_glitch.state == TccTransientState::Fill && !band_glitch.contact_detected);
+    auto band_second = c.step(in(true, false, true, 94, 89, 1344, 20));
+    assert(band_second.state == TccTransientState::Fill && !band_second.contact_detected);
+    auto band_contact = c.step(in(true, false, true, 93, 89, 1344, 40));
+    assert(band_contact.state == TccTransientState::SlipControl && band_contact.contact_detected);
+
     // Slip is a magnitude, including through contact detection.
     c.reset();
     auto negative_slip = c.step(in(true, false, true, -331, 89, 1344, 0));
@@ -98,7 +109,8 @@ int main() {
     assert(c.step(in(true, false, false, 300, 89, 1344, 20)).pressure == 0);
 
     // Reset models every gearbox bypass: Park/Neutral, invalid-speed, and
-    // diagnostic paths cannot restore the old D2 pressure on re-entry.
+    // diagnostic and engine-stopped bypasses cannot restore the old D2
+    // pressure on re-entry.
     c.reset();
     for (int i = 0; i < 8; ++i) c.step(in(true, false, true, 331, 50, 1344, i * 20));
     c.reset();

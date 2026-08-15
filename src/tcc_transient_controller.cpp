@@ -114,14 +114,15 @@ TccTransientOutput TccTransientController::step(const TccTransientInput& input) 
         pressure_ = slew(pressure_, contact_search_pressure, TccTransientCalibration::kApplySlewPerCycle);
         const bool cumulative_drop = fill_entry_slip_rpm_ - actual_slip >= TccTransientCalibration::kContactSlipDropRpm;
         const bool falling_or_steady = actual_slip <= previous_slip_rpm_ + 2;
-        if (pressure_ > 0 && cumulative_drop && falling_or_steady) {
+        const bool in_target_band = actual_slip <= target_slip + TccTransientCalibration::kLockSlipBand;
+        const bool contact_evidence = cumulative_drop || in_target_band;
+        if (pressure_ > 0 && contact_evidence && falling_or_steady) {
             contact_confirm_cycles_ += 1;
         } else if (!falling_or_steady) {
             contact_confirm_cycles_ = 0;
         }
         previous_slip_rpm_ = actual_slip;
-        contact_detected_ = contact_confirm_cycles_ >= TccTransientCalibration::kContactConfirmCycles ||
-            actual_slip <= target_slip + TccTransientCalibration::kLockSlipBand;
+        contact_detected_ = contact_confirm_cycles_ >= TccTransientCalibration::kContactConfirmCycles;
         if (contact_detected_) {
             trajectory_slip_rpm_ = actual_slip;
             state_ = TccTransientState::SlipControl;
