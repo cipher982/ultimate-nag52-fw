@@ -24,8 +24,10 @@ constexpr int kFeedbackReliefSlewPerCycle = 60;
 constexpr int kApplyTargetSlipRpm = 90;
 constexpr int kOpenTargetSlipRpm = 110;
 constexpr int kContactSearchPressure = 800;
+constexpr int kContactSeekSlewPerCycle = 5;
+constexpr int kContactSeekTimeoutMs = 3000;
 constexpr int kMaxCommandPressure = 2000;
-constexpr int kContactSlipDropRpm = 25;
+constexpr int kContactClosurePerCycle = 3;
 constexpr int kContactConfirmCycles = 3;
 constexpr int kTargetSlipSlewPerCycle = 10;
 constexpr int kLockSlipBand = 12;
@@ -53,6 +55,7 @@ enum class TccTransientReason : uint8_t {
     TargetHysteresis = 6,
     InvalidPressure = 7,
     ExcessiveSlipRate = 8,
+    ContactNotDetected = 9,
 };
 
 struct TccTransientInput {
@@ -107,7 +110,7 @@ private:
     TccTransientState state_ = TccTransientState::Open;
     TccTransientReason reason_ = TccTransientReason::None;
     int pressure_ = 0;
-    int fill_entry_slip_rpm_ = 0;
+    uint32_t fill_started_ms_ = 0;
     int previous_slip_rpm_ = 0;
     int trajectory_slip_rpm_ = 0;
     int integral_correction_ = 0;
