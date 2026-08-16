@@ -1,5 +1,8 @@
 # TCC V2 Phase 1: Offline Closed-Loop Prototype
 
+> Historical baseline. Phase 2 supersedes the 30 RPM guard and no-contact
+> behavior described here; see `docs/tcc-v2-phase2-log-envelope.md`.
+
 ## Decision
 
 This branch is an offline control prototype based on installed commit

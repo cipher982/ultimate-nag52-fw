@@ -154,20 +154,42 @@ int main() {
     auto opened = c.step(in(false, false, true, 320, 111, 1344, 60));
     assert(opened.state == TccTransientState::Open && opened.pressure < held_apply.pressure);
 
-    // Without rate-confirmed contact, search creeps above the initial 800 mbar
-    // level but never exceeds the learned map, then latches open at timeout.
+    // Without rate-confirmed contact, search holds at the provisional 800 mbar
+    // ceiling rather than creeping toward an unvalidated learned-map pressure.
     c.reset();
     for (int i = 0; i < 150; ++i) {
         auto out = c.step(in(true, false, true, 331, 89, 1344, i * 20));
         assert(out.state == TccTransientState::Fill);
         assert(!out.contact_detected);
-        assert(out.pressure <= 1344);
+        assert(out.pressure <= TccTransientCalibration::kContactSearchPressure);
     }
     auto contact_timeout = c.step(in(true, false, true, 331, 89, 1344, 3000));
     assert(contact_timeout.state == TccTransientState::ReleaseFault);
     assert(contact_timeout.reason == TccTransientReason::ContactNotDetected);
     assert(contact_timeout.pressure == 0);
     assert(c.step(in(true, false, true, 331, 89, 1344, 3020)).pressure == 0);
+
+    // Signed slip is preserved for the emergency guard. Equal magnitudes on
+    // opposite sides of zero must still expose a 40 RPM pull-through.
+    c.reset();
+    auto positive_slip = c.step(in(true, false, true, 20, 89, 1344, 0));
+    assert(positive_slip.state == TccTransientState::Fill);
+    auto zero_crossing = c.step(in(true, false, true, -20, 89, 1344, 20));
+    assert(zero_crossing.state == TccTransientState::ReleaseFault);
+    assert(zero_crossing.reason == TccTransientReason::ExcessiveSlipRate);
+    assert(zero_crossing.pressure == 0);
+    assert(zero_crossing.slip_delta_rpm == -40);
+
+    // The provisional boundary is strict: 25 RPM is accepted, 26 RPM aborts.
+    c.reset();
+    c.step(in(true, false, true, 100, 89, 1344, 0));
+    auto at_boundary = c.step(in(true, false, true, 75, 89, 1344, 20));
+    assert(at_boundary.reason != TccTransientReason::ExcessiveSlipRate);
+    c.reset();
+    c.step(in(true, false, true, 100, 89, 1344, 0));
+    auto over_boundary = c.step(in(true, false, true, 74, 89, 1344, 20));
+    assert(over_boundary.reason == TccTransientReason::ExcessiveSlipRate);
+    assert(over_boundary.pressure == 0);
 
     // Persisted map data is untrusted. Even a 10,000 mbar cell cannot command
     // above the independent V1 ceiling after contact.
@@ -245,12 +267,12 @@ int main() {
     // hard-open request, or invalid speed commands exactly zero in one cycle.
     c.reset();
     c.step(in(true, false, true, 331, 89, 1344, 0));
-    auto pressured = c.step(in(true, false, true, 301, 89, 1344, 20));
+    auto pressured = c.step(in(true, false, true, 306, 89, 1344, 20));
     assert(pressured.pressure > 0);
-    assert(c.step(in(true, true, true, 301, 89, 1344, 40)).pressure == 0);
+    assert(c.step(in(true, true, true, 306, 89, 1344, 40)).pressure == 0);
     c.reset();
     c.step(in(true, false, true, 331, 89, 1344, 0));
-    assert(c.step(in(true, false, false, 301, 89, 1344, 20)).pressure == 0);
+    assert(c.step(in(true, false, false, 306, 89, 1344, 20)).pressure == 0);
 
     // Reset models every gearbox bypass: Park/Neutral, invalid-speed, and
     // diagnostic and engine-stopped bypasses cannot restore the old D2

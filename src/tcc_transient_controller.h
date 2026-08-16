@@ -17,14 +17,13 @@ constexpr int kIntegralErrorDivisor = 8;
 constexpr int kIntegralFeedbackLimit = 600;
 constexpr int kSlipRateFeedbackGain = 10;
 constexpr int kSlipRateFeedbackLimit = 600;
-constexpr int kMaxDesiredSlipClosurePerCycle = 20;
-constexpr int kHardSlipClosurePerCycle = 30;
+constexpr int kMaxDesiredSlipClosurePerCycle = 10;
+constexpr int kHardSlipClosurePerCycle = 25;
 constexpr int kCombinedFeedbackLimit = 1400;
 constexpr int kFeedbackReliefSlewPerCycle = 60;
 constexpr int kApplyTargetSlipRpm = 90;
 constexpr int kOpenTargetSlipRpm = 110;
 constexpr int kContactSearchPressure = 800;
-constexpr int kContactSeekSlewPerCycle = 5;
 constexpr int kContactSeekTimeoutMs = 3000;
 constexpr int kMaxCommandPressure = 2000;
 constexpr int kContactClosurePerCycle = 3;
@@ -62,7 +61,10 @@ struct TccTransientInput {
     bool request_apply;
     bool force_open;
     bool speed_valid;
-    int actual_slip_rpm;
+    // Signed engine RPM minus transmission-input RPM. Normal control uses the
+    // magnitude; the hard-closure guard preserves the sign so a pull-through
+    // from positive to negative slip cannot disappear behind abs().
+    int signed_actual_slip_rpm;
     int target_slip_rpm;
     int feedforward_pressure;
     uint32_t now_ms;
@@ -112,6 +114,7 @@ private:
     int pressure_ = 0;
     uint32_t fill_started_ms_ = 0;
     int previous_slip_rpm_ = 0;
+    int previous_signed_slip_rpm_ = 0;
     int trajectory_slip_rpm_ = 0;
     int integral_correction_ = 0;
     int contact_confirm_cycles_ = 0;

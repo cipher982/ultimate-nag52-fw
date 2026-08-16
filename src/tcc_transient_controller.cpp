@@ -66,6 +66,7 @@ void TccTransientController::reset_control_state() {
     pressure_ = 0;
     fill_started_ms_ = 0;
     previous_slip_rpm_ = 0;
+    previous_signed_slip_rpm_ = 0;
     trajectory_slip_rpm_ = 0;
     integral_correction_ = 0;
     contact_confirm_cycles_ = 0;
@@ -85,7 +86,8 @@ void TccTransientController::reset() {
 }
 
 TccTransientOutput TccTransientController::step(const TccTransientInput& input) {
-    const int actual_slip = clamp_int(input.actual_slip_rpm < 0 ? -input.actual_slip_rpm : input.actual_slip_rpm, 0, 10000);
+    const int signed_actual_slip = clamp_int(input.signed_actual_slip_rpm, -10000, 10000);
+    const int actual_slip = signed_actual_slip < 0 ? -signed_actual_slip : signed_actual_slip;
     const int target_slip = clamp_int(input.target_slip_rpm, 0, 10000);
     // Persisted adaptation maps are untrusted inputs. V1 has an independent
     // ceiling so a stale/corrupt 10,000 mbar cell cannot recreate the legacy
@@ -149,6 +151,7 @@ TccTransientOutput TccTransientController::step(const TccTransientInput& input) 
         state_ = TccTransientState::Fill;
         fill_started_ms_ = input.now_ms;
         previous_slip_rpm_ = actual_slip;
+        previous_signed_slip_rpm_ = signed_actual_slip;
         trajectory_slip_rpm_ = actual_slip;
         contact_confirm_cycles_ = 0;
         contact_detected_ = false;
@@ -158,14 +161,16 @@ TccTransientOutput TccTransientController::step(const TccTransientInput& input) 
     int feedback = 0;
     int slip_rate_feedback = 0;
     const int slip_delta = actual_slip - previous_slip_rpm_;
-    if (slip_delta < -TccTransientCalibration::kHardSlipClosurePerCycle) {
+    const int signed_slip_delta = signed_actual_slip - previous_signed_slip_rpm_;
+    if (signed_slip_delta < -TccTransientCalibration::kHardSlipClosurePerCycle) {
         state_ = TccTransientState::ReleaseFault;
         reason_ = TccTransientReason::ExcessiveSlipRate;
         pressure_ = 0;
         integral_correction_ = 0;
         contact_detected_ = false;
         previous_slip_rpm_ = actual_slip;
-        return {state_, reason_, pressure_, feedforward, 0, 0, 0, actual_slip, slip_delta,
+        previous_signed_slip_rpm_ = signed_actual_slip;
+        return {state_, reason_, pressure_, feedforward, 0, 0, 0, actual_slip, signed_slip_delta,
             target_slip, trajectory_slip_rpm_, contact_detected_};
     }
     if (state_ == TccTransientState::Fill) {
@@ -173,13 +178,8 @@ TccTransientOutput TccTransientController::step(const TccTransientInput& input) 
         // There is no 10,000 mbar transient command in this path.
         const int initial_search_pressure = feedforward < TccTransientCalibration::kContactSearchPressure
             ? feedforward : TccTransientCalibration::kContactSearchPressure;
-        if (pressure_ < initial_search_pressure) {
-            pressure_ = slew(pressure_, initial_search_pressure,
-                TccTransientCalibration::kApplySlewPerCycle);
-        } else {
-            pressure_ = slew(pressure_, feedforward,
-                TccTransientCalibration::kContactSeekSlewPerCycle);
-        }
+        pressure_ = slew(pressure_, initial_search_pressure,
+            TccTransientCalibration::kApplySlewPerCycle);
         const int closure_per_cycle = previous_slip_rpm_ - actual_slip;
         if (pressure_ > 0 &&
             closure_per_cycle >= TccTransientCalibration::kContactClosurePerCycle) {
@@ -188,6 +188,7 @@ TccTransientOutput TccTransientController::step(const TccTransientInput& input) 
             contact_confirm_cycles_ = 0;
         }
         previous_slip_rpm_ = actual_slip;
+        previous_signed_slip_rpm_ = signed_actual_slip;
         contact_detected_ = contact_confirm_cycles_ >= TccTransientCalibration::kContactConfirmCycles;
         if (contact_detected_) {
             trajectory_slip_rpm_ = actual_slip;
@@ -231,12 +232,13 @@ TccTransientOutput TccTransientController::step(const TccTransientInput& input) 
             : TccTransientCalibration::kApplySlewPerCycle;
         pressure_ = slew(pressure_, requested, pressure_slew);
         previous_slip_rpm_ = actual_slip;
+        previous_signed_slip_rpm_ = signed_actual_slip;
         state_ = target_slip <= TccTransientCalibration::kLockSlipBand &&
             actual_slip <= target_slip + TccTransientCalibration::kLockSlipBand
             ? TccTransientState::Locked : TccTransientState::SlipControl;
     }
 
     return {state_, reason_, pressure_, feedforward, feedback, integral_correction_, slip_rate_feedback,
-        actual_slip, slip_delta, target_slip,
+        actual_slip, signed_slip_delta, target_slip,
         trajectory_slip_rpm_, contact_detected_};
 }
