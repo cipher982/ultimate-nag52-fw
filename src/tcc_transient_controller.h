@@ -31,10 +31,18 @@ constexpr int kContactConfirmCycles = 3;
 constexpr int kTargetSlipSlewPerCycle = 10;
 constexpr int kLockSlipBand = 12;
 constexpr int kCoastOverrunOpenSlipRpm = 40;
+constexpr int kCoastModeEnterPedal = 15;
+constexpr int kCoastModeExitPedal = 20;
 }
 
 inline bool tcc_transient_applies_to_gear(uint8_t gear, bool gear_enabled) {
     return gear_enabled && gear >= 2 && gear <= 5;
+}
+
+inline bool tcc_transient_update_coast_mode(bool coast_mode, uint16_t pedal_position) {
+    if (pedal_position <= TccTransientCalibration::kCoastModeEnterPedal) return true;
+    if (pedal_position >= TccTransientCalibration::kCoastModeExitPedal) return false;
+    return coast_mode;
 }
 
 enum class TccTransientState : uint8_t {

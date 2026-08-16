@@ -71,6 +71,7 @@ void TorqueConverter::diag_toggle_tcc_sol(bool en) {
 void TorqueConverter::reset_apply_state() {
     this->transient_controller.reset();
     this->transient_snapshot = {};
+    this->transient_coast_mode = false;
     this->tcc_commanded_pressure = 0;
     this->current_tcc_state = InternalTccState::Open;
     this->target_tcc_state = InternalTccState::Open;
@@ -332,6 +333,10 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
     bool transient_handled = false;
     if (controlled_transient) {
         this->transient_controller.select_gear((uint8_t)curr_gear);
+        this->transient_coast_mode = tcc_transient_update_coast_mode(
+            this->transient_coast_mode,
+            sensors->pedal_pos
+        );
         const int base_pressure = this->target_tcc_state == InternalTccState::Closed
             ? this->tcc_lock_map->get_value(load_as_percent, (uint8_t)curr_gear)
             : this->tcc_slip_map->get_value(load_as_percent, (uint8_t)curr_gear);
@@ -343,7 +348,7 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
             controller_target_slip,
             base_pressure,
             now_ms,
-            sensors->pedal_pos <= 15,
+            this->transient_coast_mode,
         };
         this->transient_snapshot = this->transient_controller.step(transient_input);
         if (shift_guard_active) {
@@ -359,6 +364,7 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
         // D1 retains the legacy path. Clear the common D2-D5 controller so a
         // later controlled gear cannot inherit pressure or contact state.
         this->transient_controller.reset();
+        this->transient_coast_mode = false;
     }
     // Freeze adaptation in every common-controller gear for the first A/B.
     // Preserved learned maps remain read-only per-gear feed-forward ceilings.

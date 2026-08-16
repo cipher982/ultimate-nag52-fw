@@ -78,6 +78,20 @@ int main() {
     assert(tcc_transient_applies_to_gear(5, true));
     assert(!tcc_transient_applies_to_gear(2, false));
 
+    // Pedal noise around the coast boundary cannot alternate the controller
+    // between open and reacquire on consecutive samples.
+    bool coast_mode = false;
+    coast_mode = tcc_transient_update_coast_mode(coast_mode, 15);
+    assert(coast_mode);
+    coast_mode = tcc_transient_update_coast_mode(coast_mode, 16);
+    assert(coast_mode);
+    coast_mode = tcc_transient_update_coast_mode(coast_mode, 19);
+    assert(coast_mode);
+    coast_mode = tcc_transient_update_coast_mode(coast_mode, 20);
+    assert(!coast_mode);
+    coast_mode = tcc_transient_update_coast_mode(coast_mode, 19);
+    assert(!coast_mode);
+
     // With no observed shift lifecycle, normal same-gear control is released.
     TccShiftGuard guard;
     uint32_t ratio_epoch = 0;
@@ -196,19 +210,31 @@ int main() {
     // applying. Once coast overrun exceeds 40 RPM, hold hard-open until throttle
     // returns, then reacquire from one bounded Fill step.
     c.reset();
-    for (int i = 0; i < 8; ++i) {
-        c.step(in(true, false, true, 20, 10, 1344, i * 20, true));
-    }
-    auto coast_open = c.step(in(true, false, true, -41, 10, 1344, 160, true));
+    auto coast_boundary = c.step(in(true, false, true, -40, 10, 1344, 0, true));
+    assert(coast_boundary.reason != TccTransientReason::CoastOverrun);
+    auto coast_open = c.step(in(true, false, true, -41, 10, 1344, 20, true));
     assert(coast_open.state == TccTransientState::Open);
     assert(coast_open.reason == TccTransientReason::CoastOverrun);
     assert(coast_open.pressure == 0);
-    auto coast_latched = c.step(in(true, false, true, -10, 10, 1344, 180, true));
+    auto coast_latched = c.step(in(true, false, true, -10, 10, 1344, 40, true));
     assert(coast_latched.state == TccTransientState::Open);
     assert(coast_latched.reason == TccTransientReason::CoastOverrun);
-    auto tip_in_reacquire = c.step(in(true, false, true, 80, 50, 1344, 200, false));
+    auto stale_while_latched = c.step(in(true, false, false, -10, 10, 1344, 60, true));
+    assert(stale_while_latched.state == TccTransientState::ReleaseFault);
+    assert(stale_while_latched.reason == TccTransientReason::InvalidSpeed);
+    auto coast_resumed = c.step(in(true, false, true, -10, 10, 1344, 80, true));
+    assert(coast_resumed.reason == TccTransientReason::CoastOverrun);
+    auto tip_in_reacquire = c.step(in(true, false, true, 80, 50, 1344, 100, false));
     assert(tip_in_reacquire.state == TccTransientState::Fill);
     assert(tip_in_reacquire.pressure == TccTransientCalibration::kApplySlewPerCycle);
+
+    // A stale shaft sample fails open as invalid data; it cannot accidentally
+    // arm or clear the coast-overrun latch.
+    c.reset();
+    auto stale_coast = c.step(in(true, false, false, -100, 10, 1344, 0, true));
+    assert(stale_coast.state == TccTransientState::ReleaseFault);
+    assert(stale_coast.reason == TccTransientReason::InvalidSpeed);
+    assert(stale_coast.pressure == 0);
 
     // Persisted map data is untrusted. Even a 10,000 mbar cell cannot command
     // above the independent V1 ceiling after contact.
