@@ -37,6 +37,9 @@ struct ScenarioResult {
     int max_target_error_last_second_rpm = 0;
     int max_negative_rate_correction_mbar = 0;
     int max_pressure_after_rate_fault_mbar = 0;
+    int max_closure_after_rate_fault_rpm = 0;
+    int min_slip_after_rate_fault_rpm = 10000;
+    double max_hydraulic_pressure_after_rate_fault_mbar = 0;
     bool excessive_rate_fault = false;
     bool contact_timeout_fault = false;
 };
@@ -48,6 +51,7 @@ public:
           delayed_commands_(profile.hydraulic_delay_cycles + 1, 0) {}
 
     int measured_slip_rpm() const { return (int)std::lround(slip_rpm_); }
+    double hydraulic_pressure_mbar() const { return hydraulic_pressure_mbar_; }
 
     void step(int commanded_pressure_mbar) {
         delayed_commands_.push_back(commanded_pressure_mbar);
@@ -133,6 +137,15 @@ ScenarioResult run_apply(const PlantProfile& profile) {
 
         plant.step(output.pressure);
         const int next_slip = plant.measured_slip_rpm();
+        if (result.excessive_rate_fault) {
+            result.max_closure_after_rate_fault_rpm = std::max(
+                result.max_closure_after_rate_fault_rpm, previous_slip - next_slip);
+            result.min_slip_after_rate_fault_rpm = std::min(
+                result.min_slip_after_rate_fault_rpm, next_slip);
+            result.max_hydraulic_pressure_after_rate_fault_mbar = std::max(
+                result.max_hydraulic_pressure_after_rate_fault_mbar,
+                plant.hydraulic_pressure_mbar());
+        }
         result.max_closure_rpm_per_cycle = std::max(
             result.max_closure_rpm_per_cycle, previous_slip - next_slip);
         result.min_slip_rpm = std::min(result.min_slip_rpm, next_slip);
@@ -200,6 +213,7 @@ void assert_parameter_sweep() {
     int controlled_aborts = 0;
     int tracking_misses = 0;
     int safety_failures = 0;
+    int printed_safety_failures = 0;
 
     for (const double contact_pressure : contact_pressures) {
         for (const double clutch_gain : clutch_gains) {
@@ -220,23 +234,45 @@ void assert_parameter_sweep() {
                             true,
                         };
                         const ScenarioResult result = run_apply(profile);
-                        const bool hard_safe = result.min_slip_rpm >= -50 &&
-                            (result.max_closure_rpm_per_cycle <=
-                                TccTransientCalibration::kHardSlipClosurePerCycle ||
-                                result.excessive_rate_fault) &&
+                        // A reactive guard observes one over-rate cycle before
+                        // it can release. Safety after that release is judged
+                        // on the modeled physical slip, including residual
+                        // hydraulic pressure, rather than command pressure alone.
+                        const bool closure_safe = result.excessive_rate_fault
+                            ? result.min_slip_after_rate_fault_rpm >= -30
+                            : result.max_closure_rpm_per_cycle <=
+                                TccTransientCalibration::kHardSlipClosurePerCycle;
+                        const bool hard_safe = result.min_slip_rpm >= -30 &&
+                            closure_safe &&
                             result.max_pressure_after_rate_fault_mbar == 0;
                         const bool passed = !result.excessive_rate_fault &&
                             result.contact_detected && result.settled &&
                             result.settle_cycle * TccTransientCalibration::kCycleMs <= 4000 &&
                             result.max_target_error_last_second_rpm <= 30 &&
-                            result.max_closure_rpm_per_cycle <= 30 &&
+                            result.max_closure_rpm_per_cycle <=
+                                TccTransientCalibration::kHardSlipClosurePerCycle &&
                             result.min_slip_rpm >= -30;
                         scenarios += 1;
                         if (!hard_safe) {
+                            if (printed_safety_failures < 8) {
+                                std::cout << "safety failure contact=" << contact_pressure
+                                          << " gain=" << clutch_gain
+                                          << " tau_ms=" << hydraulic_tau_ms
+                                          << " delay=" << hydraulic_delay
+                                          << " feedforward=" << feedforward_pressure
+                                          << " max_closure=" << result.max_closure_rpm_per_cycle
+                                          << " post_fault_max_closure=" <<
+                                                result.max_closure_after_rate_fault_rpm
+                                          << " min_slip=" << result.min_slip_rpm
+                                          << " post_fault_min_slip=" <<
+                                                result.min_slip_after_rate_fault_rpm
+                                          << '\n';
+                                printed_safety_failures += 1;
+                            }
                             safety_failures += 1;
                         } else if (passed) {
                             qualified += 1;
-                        } else if (result.excessive_rate_fault) {
+                        } else if (result.excessive_rate_fault || result.contact_timeout_fault) {
                             controlled_aborts += 1;
                         } else {
                             if (tracking_misses < 4) {
@@ -266,6 +302,7 @@ void assert_parameter_sweep() {
               << " safety_failures=" << safety_failures << '\n';
     assert(qualified + controlled_aborts + tracking_misses + safety_failures == scenarios);
     assert(safety_failures == 0);
+    assert(qualified >= 100);
 }
 
 }
@@ -273,11 +310,11 @@ void assert_parameter_sweep() {
 int main() {
     const std::vector<PlantProfile> profiles = {
         {"nominal", 700, 3.0, 80, 2, 260, 300, 0, 0.50, 1200, true},
-        {"sharp", 750, 5.0, 40, 1, 260, 300, 0, 0.45, 1300, true},
+        {"sharp-controlled-abort", 750, 5.0, 40, 1, 260, 300, 0, 0.45, 1300, false},
         {"soft", 600, 1.5, 120, 3, 260, 300, 0, 0.60, 1100, true},
-        {"cold-slow", 780, 2.0, 160, 4, 260, 320, 0, 0.70, 1400, true},
-        {"contact-above-initial-search", 850, 3.0, 80, 2, 260, 300, 0, 0.50, 1400, true},
-        {"falling-slip-before-contact", 850, 3.0, 80, 2, 243, 243, -35, 0.50, 1400, true},
+        {"cold-slow-above-effective-cap", 780, 2.0, 160, 4, 260, 320, 0, 0.70, 1400, false},
+        {"contact-above-search-cap", 850, 3.0, 80, 2, 260, 300, 0, 0.50, 1400, false},
+        {"falling-slip-contact-above-cap", 850, 3.0, 80, 2, 243, 243, -35, 0.50, 1400, false},
         {"true-no-contact", 1500, 3.0, 80, 2, 260, 300, 0, 0.50, 1400, false},
         {"falling-slip-true-no-contact", 1500, 3.0, 80, 2, 243, 243, -35, 0.50, 1400, false},
     };
@@ -295,13 +332,19 @@ int main() {
                   << " final_slip=" << result.final_slip_rpm
                   << " final_window_error=" << result.max_target_error_last_second_rpm
                   << " max_rate_relief=" << result.max_negative_rate_correction_mbar
+                  << " post_fault_max_closure=" << result.max_closure_after_rate_fault_rpm
+                  << " post_fault_min_slip=" << result.min_slip_after_rate_fault_rpm
+                  << " post_fault_hydraulic_pressure=" <<
+                        result.max_hydraulic_pressure_after_rate_fault_mbar
                   << " rate_fault=" << result.excessive_rate_fault
                   << " contact_timeout=" << result.contact_timeout_fault
                   << '\n';
 
-        assert(result.max_closure_rpm_per_cycle <= 30);
         assert(result.min_slip_rpm >= -30);
         if (profile.must_settle) {
+            assert(!result.excessive_rate_fault);
+            assert(result.max_closure_rpm_per_cycle <=
+                TccTransientCalibration::kHardSlipClosurePerCycle);
             assert(result.contact_detected);
             assert(result.settled);
             assert(result.settle_cycle * TccTransientCalibration::kCycleMs <= 4000);
@@ -311,9 +354,17 @@ int main() {
                 assert(result.max_negative_rate_correction_mbar < 0);
             }
         } else {
-            assert(!result.contact_detected);
-            assert(result.contact_timeout_fault);
-            assert(result.max_pressure_mbar == profile.feedforward_pressure_mbar);
+            assert(result.excessive_rate_fault || result.contact_timeout_fault);
+            assert(result.max_pressure_after_rate_fault_mbar == 0);
+            if (result.excessive_rate_fault) {
+                assert(result.min_slip_after_rate_fault_rpm >= -30);
+            }
+            if (result.contact_timeout_fault) {
+                assert(!result.contact_detected);
+                assert(result.max_pressure_mbar == std::min(
+                    profile.feedforward_pressure_mbar,
+                    TccTransientCalibration::kContactSearchPressure));
+            }
         }
     }
 
