@@ -71,6 +71,7 @@ void TccTransientController::reset_control_state() {
     integral_correction_ = 0;
     contact_confirm_cycles_ = 0;
     contact_detected_ = false;
+    coast_open_latched_ = false;
 }
 
 void TccTransientController::select_gear(uint8_t gear) {
@@ -120,6 +121,22 @@ TccTransientOutput TccTransientController::step(const TccTransientInput& input) 
         integral_correction_ = 0;
         return {state_, reason_, pressure_, feedforward, 0, 0, 0, actual_slip, 0, target_slip,
             trajectory_slip_rpm_, contact_detected_};
+    }
+    if (input.coast_mode &&
+        signed_actual_slip < -TccTransientCalibration::kCoastOverrunOpenSlipRpm) {
+        coast_open_latched_ = true;
+    }
+    if (coast_open_latched_ && input.coast_mode) {
+        state_ = TccTransientState::Open;
+        reason_ = TccTransientReason::CoastOverrun;
+        pressure_ = 0;
+        contact_detected_ = false;
+        integral_correction_ = 0;
+        return {state_, reason_, pressure_, feedforward, 0, 0, 0, actual_slip, 0,
+            target_slip, trajectory_slip_rpm_, contact_detected_};
+    }
+    if (!input.coast_mode) {
+        coast_open_latched_ = false;
     }
     const bool latched_apply_fault = reason_ == TccTransientReason::ExcessiveSlipRate ||
         reason_ == TccTransientReason::ContactNotDetected;
