@@ -344,6 +344,7 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
             controller_target_slip,
             base_pressure,
             now_ms,
+            sensors->pedal_pos <= 15,
         };
         this->transient_snapshot = this->transient_controller.step(transient_input);
         if (shift_guard_active) {

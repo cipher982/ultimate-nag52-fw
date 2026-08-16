@@ -30,6 +30,7 @@ constexpr int kContactClosurePerCycle = 3;
 constexpr int kContactConfirmCycles = 3;
 constexpr int kTargetSlipSlewPerCycle = 10;
 constexpr int kLockSlipBand = 12;
+constexpr int kCoastOverrunOpenSlipRpm = 40;
 }
 
 inline bool tcc_transient_applies_to_gear(uint8_t gear, bool gear_enabled) {
@@ -55,6 +56,7 @@ enum class TccTransientReason : uint8_t {
     InvalidPressure = 7,
     ExcessiveSlipRate = 8,
     ContactNotDetected = 9,
+    CoastOverrun = 10,
 };
 
 struct TccTransientInput {
@@ -68,6 +70,7 @@ struct TccTransientInput {
     int target_slip_rpm;
     int feedforward_pressure;
     uint32_t now_ms;
+    bool coast_mode = false;
 };
 
 class TccShiftGuard {
@@ -119,6 +122,7 @@ private:
     int integral_correction_ = 0;
     int contact_confirm_cycles_ = 0;
     bool contact_detected_ = false;
+    bool coast_open_latched_ = false;
     uint8_t selected_gear_ = 0xFF;
 };
 

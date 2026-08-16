@@ -203,6 +203,7 @@ void assert_fault_release() {
 }
 
 void assert_parameter_sweep() {
+    constexpr int kComfortClosureRpmPerCycle = 12;
     const double contact_pressures[] = {600.0, 700.0, 750.0};
     const double clutch_gains[] = {1.5, 3.0, 5.0};
     const double hydraulic_taus_ms[] = {40.0, 80.0, 120.0, 160.0};
@@ -211,9 +212,11 @@ void assert_parameter_sweep() {
     int scenarios = 0;
     int qualified = 0;
     int controlled_aborts = 0;
+    int comfort_misses = 0;
     int tracking_misses = 0;
     int safety_failures = 0;
     int printed_safety_failures = 0;
+    int printed_comfort_misses = 0;
 
     for (const double contact_pressure : contact_pressures) {
         for (const double clutch_gain : clutch_gains) {
@@ -245,13 +248,15 @@ void assert_parameter_sweep() {
                         const bool hard_safe = result.min_slip_rpm >= -30 &&
                             closure_safe &&
                             result.max_pressure_after_rate_fault_mbar == 0;
-                        const bool passed = !result.excessive_rate_fault &&
+                        const bool functionally_settled = !result.excessive_rate_fault &&
                             result.contact_detected && result.settled &&
                             result.settle_cycle * TccTransientCalibration::kCycleMs <= 4000 &&
                             result.max_target_error_last_second_rpm <= 30 &&
                             result.max_closure_rpm_per_cycle <=
                                 TccTransientCalibration::kHardSlipClosurePerCycle &&
                             result.min_slip_rpm >= -30;
+                        const bool passed = functionally_settled &&
+                            result.max_closure_rpm_per_cycle <= kComfortClosureRpmPerCycle;
                         scenarios += 1;
                         if (!hard_safe) {
                             if (printed_safety_failures < 8) {
@@ -274,6 +279,18 @@ void assert_parameter_sweep() {
                             qualified += 1;
                         } else if (result.excessive_rate_fault || result.contact_timeout_fault) {
                             controlled_aborts += 1;
+                        } else if (functionally_settled) {
+                            if (printed_comfort_misses < 4) {
+                                std::cout << "comfort miss contact=" << contact_pressure
+                                          << " gain=" << clutch_gain
+                                          << " tau_ms=" << hydraulic_tau_ms
+                                          << " delay=" << hydraulic_delay
+                                          << " feedforward=" << feedforward_pressure
+                                          << " max_closure=" << result.max_closure_rpm_per_cycle
+                                          << '\n';
+                                printed_comfort_misses += 1;
+                            }
+                            comfort_misses += 1;
                         } else {
                             if (tracking_misses < 4) {
                                 std::cout << "tracking miss contact=" << contact_pressure
@@ -298,11 +315,14 @@ void assert_parameter_sweep() {
     std::cout << "parameter sweep scenarios=" << scenarios
               << " qualified=" << qualified
               << " controlled_aborts=" << controlled_aborts
+              << " comfort_misses=" << comfort_misses
               << " tracking_misses=" << tracking_misses
               << " safety_failures=" << safety_failures << '\n';
-    assert(qualified + controlled_aborts + tracking_misses + safety_failures == scenarios);
+    assert(qualified + controlled_aborts + comfort_misses + tracking_misses +
+        safety_failures == scenarios);
     assert(safety_failures == 0);
-    assert(qualified >= 100);
+    assert(qualified > 0);
+    assert(comfort_misses > 0);
 }
 
 }

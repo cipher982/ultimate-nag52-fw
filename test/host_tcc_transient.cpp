@@ -4,8 +4,9 @@
 #include <iostream>
 
 static TccTransientInput in(bool apply, bool force_open, bool valid,
-    int slip, int target, int base = 1344, uint32_t now = 0) {
-    return {apply, force_open, valid, slip, target, base, now};
+    int slip, int target, int base = 1344, uint32_t now = 0,
+    bool coast_mode = false) {
+    return {apply, force_open, valid, slip, target, base, now, coast_mode};
 }
 
 static void assert_shift_trace(uint8_t source_gear, uint8_t destination_gear) {
@@ -190,6 +191,24 @@ int main() {
     auto over_boundary = c.step(in(true, false, true, 74, 89, 1344, 20));
     assert(over_boundary.reason == TccTransientReason::ExcessiveSlipRate);
     assert(over_boundary.pressure == 0);
+
+    // The August 15 coast event reached large negative slip while the TCC kept
+    // applying. Once coast overrun exceeds 40 RPM, hold hard-open until throttle
+    // returns, then reacquire from one bounded Fill step.
+    c.reset();
+    for (int i = 0; i < 8; ++i) {
+        c.step(in(true, false, true, 20, 10, 1344, i * 20, true));
+    }
+    auto coast_open = c.step(in(true, false, true, -41, 10, 1344, 160, true));
+    assert(coast_open.state == TccTransientState::Open);
+    assert(coast_open.reason == TccTransientReason::CoastOverrun);
+    assert(coast_open.pressure == 0);
+    auto coast_latched = c.step(in(true, false, true, -10, 10, 1344, 180, true));
+    assert(coast_latched.state == TccTransientState::Open);
+    assert(coast_latched.reason == TccTransientReason::CoastOverrun);
+    auto tip_in_reacquire = c.step(in(true, false, true, 80, 50, 1344, 200, false));
+    assert(tip_in_reacquire.state == TccTransientState::Fill);
+    assert(tip_in_reacquire.pressure == TccTransientCalibration::kApplySlewPerCycle);
 
     // Persisted map data is untrusted. Even a 10,000 mbar cell cannot command
     // above the independent V1 ceiling after contact.

@@ -1,5 +1,8 @@
 # TCC V2 Phase 2: Log-Constrained Contact Search
 
+> Historical intermediate. The post-review coast-overrun and stricter comfort
+> evaluation are documented in `docs/tcc-v2-phase3-overrun-eval.md`.
+
 ## Decision
 
 Phase 2 remains **offline-only**. It uses the installed `482b299` V1 road log
