@@ -35,6 +35,7 @@
 #define RLI_CURR_SW_PART_INFO   0x2A // Current FW size and address
 #define RLI_NEXT_SW_PART_INFO   0x2B // Current FW size and address
 #define RLI_EMBED_FILE_INFO     0x2C // location and len of EMBED.ZIP
+#define RLI_TCC_TRANSIENT       0x2D // V2 TCC controller internals
 
 #define RLI_CLUTCH_SPEEDS   0x30
 #define RLI_SHIFTING_ALGO   0x31
@@ -156,6 +157,27 @@ typedef struct {
     int16_t load_percent;
 } __attribute__ ((packed)) DATA_TCC_PROGRAM;
 
+// Read-only V2 TCC controller trace. This is separate from RLI 0x24 so the
+// existing config-app and logger wire contract remains unchanged.
+typedef struct {
+    uint8_t state;
+    uint8_t reason;
+    // bit 0: contact detected; bit 1: coast-mode hysteresis active
+    uint8_t flags;
+    uint16_t pedal_position;
+    int16_t signed_slip_rpm;
+    int16_t slip_delta_rpm;
+    uint16_t target_slip_rpm;
+    uint16_t trajectory_slip_rpm;
+    uint16_t pressure_mbar;
+    uint16_t feedforward_pressure_mbar;
+    int16_t feedback_correction_mbar;
+    int16_t integral_correction_mbar;
+    int16_t slip_rate_correction_mbar;
+} __attribute__ ((packed)) DATA_TCC_TRANSIENT;
+
+static_assert(sizeof(DATA_TCC_TRANSIENT) == 23, "DATA_TCC_TRANSIENT wire size changed");
+
 typedef struct {
     uint32_t address;
     uint32_t size;
@@ -193,6 +215,7 @@ DATA_CANBUS_RX get_rx_can_data(EgsBaseCan* can_layer);
 DATA_SYS_USAGE get_sys_usage(void);
 SHIFT_LIVE_INFO get_shift_live_Data(const EgsBaseCan* can_layer, Gearbox* g);
 DATA_TCC_PROGRAM get_tcc_program_data(Gearbox* gb_ptr);
+DATA_TCC_TRANSIENT get_tcc_transient_data(Gearbox* gb_ptr);
 
 // Read and write TCU Module settings
 

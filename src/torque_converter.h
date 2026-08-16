@@ -65,6 +65,7 @@ class TorqueConverter {
         uint16_t get_current_pressure();
         uint16_t get_target_pressure();
         TccTransientOutput get_transient_snapshot() const { return this->transient_snapshot; }
+        bool get_transient_coast_mode() const { return this->transient_coast_mode; }
         uint16_t get_slip_targ() {
             return this->slip_target;
         }
@@ -128,6 +129,7 @@ class TorqueConverter {
         uint8_t prefill_cycles = 0;
         TccTransientController transient_controller;
         TccTransientOutput transient_snapshot = {};
+        bool transient_coast_mode = false;
         TccShiftGuard shift_guard;
 };
 

@@ -111,6 +111,31 @@ DATA_TCC_PROGRAM get_tcc_program_data(Gearbox* gb_ptr) {
     return ret;
 }
 
+DATA_TCC_TRANSIENT get_tcc_transient_data(Gearbox* gb_ptr) {
+    DATA_TCC_TRANSIENT ret = {};
+    const TccTransientOutput snapshot = gb_ptr->tcc->get_transient_snapshot();
+    ret.state = static_cast<uint8_t>(snapshot.state);
+    ret.reason = static_cast<uint8_t>(snapshot.reason);
+    ret.flags = snapshot.contact_detected ? 0x01 : 0x00;
+    if (gb_ptr->tcc->get_transient_coast_mode()) {
+        ret.flags |= 0x02;
+    }
+    ret.pedal_position = gb_ptr->sensor_data.pedal_pos;
+    ret.signed_slip_rpm = static_cast<int16_t>(
+        static_cast<int>(gb_ptr->sensor_data.engine_rpm) -
+        static_cast<int>(gb_ptr->sensor_data.input_rpm)
+    );
+    ret.slip_delta_rpm = static_cast<int16_t>(snapshot.slip_delta_rpm);
+    ret.target_slip_rpm = static_cast<uint16_t>(snapshot.target_slip_rpm);
+    ret.trajectory_slip_rpm = static_cast<uint16_t>(snapshot.trajectory_slip_rpm);
+    ret.pressure_mbar = static_cast<uint16_t>(snapshot.pressure);
+    ret.feedforward_pressure_mbar = static_cast<uint16_t>(snapshot.feedforward_pressure);
+    ret.feedback_correction_mbar = static_cast<int16_t>(snapshot.feedback_correction);
+    ret.integral_correction_mbar = static_cast<int16_t>(snapshot.integral_correction);
+    ret.slip_rate_correction_mbar = static_cast<int16_t>(snapshot.slip_rate_correction);
+    return ret;
+}
+
 DATA_CANBUS_RX get_rx_can_data(EgsBaseCan* can_layer) {
     DATA_CANBUS_RX ret = {};
     if (can_layer == nullptr || gearbox == nullptr) {

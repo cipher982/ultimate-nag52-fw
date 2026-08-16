@@ -54,6 +54,12 @@ public:
     double hydraulic_pressure_mbar() const { return hydraulic_pressure_mbar_; }
 
     void step(int commanded_pressure_mbar) {
+        const double free_slip_rpm = profile_.free_slip_rpm +
+            profile_.free_slip_ramp_rpm_per_second * elapsed_seconds_;
+        step_toward(commanded_pressure_mbar, free_slip_rpm);
+    }
+
+    void step_toward(int commanded_pressure_mbar, double free_slip_rpm) {
         delayed_commands_.push_back(commanded_pressure_mbar);
         const int delayed_command = delayed_commands_.front();
         delayed_commands_.pop_front();
@@ -62,8 +68,6 @@ public:
             TccTransientCalibration::kCycleMs / profile_.hydraulic_tau_ms);
         hydraulic_pressure_mbar_ += (delayed_command - hydraulic_pressure_mbar_) * hydraulic_fraction;
 
-        const double free_slip_rpm = profile_.free_slip_rpm +
-            profile_.free_slip_ramp_rpm_per_second * elapsed_seconds_;
         const double open_converter_rate =
             (free_slip_rpm - slip_rpm_) / profile_.free_slip_tau_seconds;
         const double clutch_pressure = std::max(0.0,
@@ -74,7 +78,7 @@ public:
         const double clutch_direction = slip_rpm_ >= 0.0 ? 1.0 : -1.0;
         const double slip_rate = open_converter_rate - clutch_direction * clutch_rate;
         slip_rpm_ += slip_rate * (TccTransientCalibration::kCycleMs / 1000.0);
-        slip_rpm_ = std::max(-200.0, std::min(1000.0, slip_rpm_));
+        slip_rpm_ = std::max(-500.0, std::min(1000.0, slip_rpm_));
         elapsed_seconds_ += TccTransientCalibration::kCycleMs / 1000.0;
     }
 
@@ -200,6 +204,49 @@ void assert_fault_release() {
     assert(output.pressure == 0);
     output = controller.step({false, false, true, 190, 120, 1200, 120});
     assert(output.state == TccTransientState::Open);
+}
+
+void assert_coast_overrun_closed_loop() {
+    const PlantProfile profile = {
+        "coast-overrun", 700, 2.0, 80, 2, 80, 80, 0, 0.18, 1200, false,
+    };
+    TccTransientController controller;
+    controller.select_gear(2);
+    SimpleTccPlant plant(profile);
+    TccTransientOutput output{};
+
+    // Establish a pressured application before introducing the logged coast
+    // disturbance. This is a plant/controller loop, not a canned slip trace.
+    for (int cycle = 0; cycle < 30; ++cycle) {
+        output = controller.step({true, false, true, plant.measured_slip_rpm(),
+            10, 1200, (uint32_t)(cycle * TccTransientCalibration::kCycleMs), false});
+        plant.step_toward(output.pressure, 80.0);
+    }
+    assert(output.pressure > 0);
+
+    bool coast_latched = false;
+    int min_coast_slip = plant.measured_slip_rpm();
+    for (int cycle = 30; cycle < 130; ++cycle) {
+        output = controller.step({true, false, true, plant.measured_slip_rpm(),
+            10, 1200, (uint32_t)(cycle * TccTransientCalibration::kCycleMs), true});
+        if (output.reason == TccTransientReason::CoastOverrun) {
+            coast_latched = true;
+            assert(output.state == TccTransientState::Open);
+            assert(output.pressure == 0);
+        }
+        plant.step_toward(output.pressure, -360.0);
+        min_coast_slip = std::min(min_coast_slip, plant.measured_slip_rpm());
+    }
+    assert(coast_latched);
+    // Do not hide the measured -327 RPM regime behind the old -200 RPM plant
+    // clamp. The open converter is allowed to follow the negative disturbance.
+    assert(min_coast_slip <= -327);
+
+    output = controller.step({true, false, true, plant.measured_slip_rpm(),
+        50, 1200, 130 * TccTransientCalibration::kCycleMs, false});
+    assert(output.state == TccTransientState::Fill);
+    assert(output.reason == TccTransientReason::None);
+    assert(output.pressure == TccTransientCalibration::kApplySlewPerCycle);
 }
 
 void assert_parameter_sweep() {
@@ -389,6 +436,7 @@ int main() {
     }
 
     assert_fault_release();
+    assert_coast_overrun_closed_loop();
     assert_parameter_sweep();
     std::cout << "host TCC closed-loop simulation passed\n";
 }
