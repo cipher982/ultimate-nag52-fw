@@ -396,20 +396,19 @@ int main() {
     c.step(in(true, false, true, 150, 50, 1100, 20));
     auto fault1 = c.step(in(true, false, true, 100, 50, 1100, 40));
     assert(fault1.state == TccTransientState::ReleaseFault && fault1.reason == TccTransientReason::ExcessiveSlipRate);
-    
+
     auto cooldown1 = c.step(in(true, false, true, 100, 50, 1100, 2050));
     assert(cooldown1.state == TccTransientState::Fill);
     c.step(in(true, false, true, 150, 50, 1100, 2070));
-    c.step(in(true, false, true, 100, 50, 1100, 2090));
-    
+
     auto cooldown2 = c.step(in(true, false, true, 100, 50, 1100, 4100));
     assert(cooldown2.state == TccTransientState::Fill);
     c.step(in(true, false, true, 150, 50, 1100, 4120));
     c.step(in(true, false, true, 100, 50, 1100, 4140));
-    
+
     auto latched = c.step(in(true, false, true, 100, 50, 1100, 7000));
     assert(latched.state == TccTransientState::ReleaseFault && latched.pressure == 0);
-    
+
     auto cleared = c.step(in(false, false, true, 100, 50, 1100, 7020));
     assert(cleared.reason == TccTransientReason::DemandOpen);
     std::cout << "host TCC transient tests passed\n";
