@@ -137,6 +137,7 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
     int ratio_error_rpm, uint32_t ratio_sample_epoch) {
     int slip_now = abs((int32_t)sensors->engine_rpm-(int32_t)sensors->input_rpm);
     int motor_torque = sensors->converted_torque;
+    const uint8_t pedal_as_percent = tcc_transient_pedal_percent(sensors->pedal_pos);
     int load_as_percent = abs(((int)motor_torque*100) / this->rated_max_torque);
     this->engine_load_percent = load_as_percent;
 
@@ -192,7 +193,6 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
     if (can_enable_tcc && gear_tcc_enabled) {
         // See if we should slip or close based on maps
         targ = InternalTccState::Open;
-        int pedal_as_percent = (sensors->pedal_pos*100)/250;
         if (sensors->input_torque > 0) {
             slipping_rpm_targ = this->slip_rpm_target_map->get_value(pedal_as_percent, sensors->input_rpm);
         } else {
@@ -216,14 +216,14 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
                 open_tcc = true;
             } else {
                 if (upshifting) {
-                    if (sensors->pedal_pos > 15) {
+                    if (pedal_as_percent > 15) {
                         open_tcc = TCC_CURRENT_SETTINGS.unlock_load_upshifts;
                     } else {
                         open_tcc = TCC_CURRENT_SETTINGS.unlock_coasting_upshifts;
                     }
                 } else {
                     // Downshifting
-                    if (sensors->pedal_pos > 15) {
+                    if (pedal_as_percent > 15) {
                         open_tcc = TCC_CURRENT_SETTINGS.unlock_load_downshifts;
                     } else {
                         open_tcc = TCC_CURRENT_SETTINGS.unlock_coasting_downshifts;
@@ -335,7 +335,8 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
         this->transient_controller.select_gear((uint8_t)curr_gear);
         this->transient_coast_mode = tcc_transient_update_coast_mode(
             this->transient_coast_mode,
-            sensors->pedal_pos
+            pedal_as_percent,
+            motor_torque < 0
         );
         const int base_pressure = this->target_tcc_state == InternalTccState::Closed
             ? this->tcc_lock_map->get_value(load_as_percent, (uint8_t)curr_gear)

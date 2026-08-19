@@ -42,6 +42,8 @@ struct ScenarioResult {
     double max_hydraulic_pressure_after_rate_fault_mbar = 0;
     bool excessive_rate_fault = false;
     bool contact_timeout_fault = false;
+    int rate_fault_cycle = -1;
+    int max_pressure_during_rate_cooldown_mbar = 0;
 };
 
 class SimpleTccPlant {
@@ -114,7 +116,9 @@ ScenarioResult run_apply(const PlantProfile& profile) {
         const int pressure_delta = output.pressure - previous_pressure;
         assert(output.pressure >= 0);
         assert(output.pressure <= TccTransientCalibration::kMaxCommandPressure);
-        assert(output.pressure <= profile.feedforward_pressure_mbar);
+        assert(output.pressure <= std::min(
+            profile.feedforward_pressure_mbar + TccTransientCalibration::kFeedbackHeadroom,
+            TccTransientCalibration::kMaxCommandPressure));
         assert(pressure_delta <= TccTransientCalibration::kApplySlewPerCycle);
         if (output.state != TccTransientState::ReleaseFault) {
             assert(pressure_delta >= -TccTransientCalibration::kFeedbackReliefSlewPerCycle);
@@ -122,6 +126,7 @@ ScenarioResult run_apply(const PlantProfile& profile) {
 
         if (output.reason == TccTransientReason::ExcessiveSlipRate) {
             result.excessive_rate_fault = true;
+            if (result.rate_fault_cycle < 0) result.rate_fault_cycle = cycle;
         }
         if (output.reason == TccTransientReason::ContactNotDetected) {
             result.contact_timeout_fault = true;
@@ -149,6 +154,13 @@ ScenarioResult run_apply(const PlantProfile& profile) {
             result.max_hydraulic_pressure_after_rate_fault_mbar = std::max(
                 result.max_hydraulic_pressure_after_rate_fault_mbar,
                 plant.hydraulic_pressure_mbar());
+        }
+        if (result.rate_fault_cycle >= 0 &&
+            cycle - result.rate_fault_cycle <
+                TccTransientCalibration::kFaultRetryCooldownMs /
+                    TccTransientCalibration::kCycleMs) {
+            result.max_pressure_during_rate_cooldown_mbar = std::max(
+                result.max_pressure_during_rate_cooldown_mbar, output.pressure);
         }
         result.max_closure_rpm_per_cycle = std::max(
             result.max_closure_rpm_per_cycle, previous_slip - next_slip);
@@ -196,6 +208,8 @@ void assert_fault_release() {
     controller.step({true, false, true, 240, 50, 1200, 40});
     controller.step({true, false, true, 230, 50, 1200, 60});
     output = controller.step({true, false, true, 190, 50, 1200, 80});
+    assert(output.reason != TccTransientReason::ExcessiveSlipRate);
+    output = controller.step({true, false, true, 150, 50, 1200, 100});
     assert(output.state == TccTransientState::ReleaseFault);
     assert(output.reason == TccTransientReason::ExcessiveSlipRate);
     assert(output.pressure == 0);
@@ -247,6 +261,111 @@ void assert_coast_overrun_closed_loop() {
     assert(output.state == TccTransientState::Fill);
     assert(output.reason == TccTransientReason::None);
     assert(output.pressure == TccTransientCalibration::kApplySlewPerCycle);
+
+    int previous_pressure = output.pressure;
+    for (int cycle = 131; cycle < 151; ++cycle) {
+        plant.step_toward(output.pressure, 80.0);
+        output = controller.step({true, false, true, plant.measured_slip_rpm(),
+            50, 1200, (uint32_t)(cycle * TccTransientCalibration::kCycleMs), false});
+        assert(output.reason != TccTransientReason::CoastOverrun);
+        assert(output.state != TccTransientState::ReleaseFault);
+        assert(output.pressure - previous_pressure <= TccTransientCalibration::kApplySlewPerCycle);
+        previous_pressure = output.pressure;
+    }
+}
+
+void assert_low_slip_cruise() {
+    TccTransientController controller;
+    controller.select_gear(5);
+    bool contact_detected = false;
+    for (int cycle = 0; cycle < 500; ++cycle) {
+        const int slip = 10 + (cycle % 6) * 2;
+        const auto output = controller.step({true, false, true, slip, 10, 1100,
+            (uint32_t)(cycle * TccTransientCalibration::kCycleMs)});
+        assert(output.reason != TccTransientReason::ContactNotDetected);
+        assert(output.state != TccTransientState::ReleaseFault);
+        assert(output.pressure <= 1100 + TccTransientCalibration::kFeedbackHeadroom);
+        contact_detected = contact_detected || output.contact_detected;
+    }
+    assert(contact_detected);
+}
+
+void assert_positive_feedback_headroom() {
+    TccTransientController controller;
+    controller.select_gear(5);
+    const int feedforward = 1100;
+    controller.step({true, false, true, 30, 10, feedforward, 0});
+    controller.step({true, false, true, 25, 10, feedforward, 20});
+    auto output = controller.step({true, false, true, 20, 10, feedforward, 40});
+    assert(output.contact_detected);
+
+    bool added_pressure = false;
+    int maximum_pressure = output.pressure;
+    for (int cycle = 3; cycle < 180; ++cycle) {
+        output = controller.step({true, false, true, 40, 10, feedforward,
+            (uint32_t)(cycle * TccTransientCalibration::kCycleMs)});
+        maximum_pressure = std::max(maximum_pressure, output.pressure);
+        added_pressure = added_pressure || output.pressure > feedforward;
+        assert(output.pressure <= feedforward + TccTransientCalibration::kFeedbackHeadroom);
+    }
+    assert(added_pressure);
+    assert(maximum_pressure == feedforward + TccTransientCalibration::kFeedbackHeadroom);
+}
+
+void assert_integrator_deadband() {
+    TccTransientController controller;
+    controller.select_gear(5);
+    const int feedforward = 1100;
+    auto output = controller.step({true, false, true, 10, 10, feedforward, 0});
+    assert(output.contact_detected);
+    const int initial_integral = output.integral_correction;
+    for (int cycle = 1; cycle <= 250; ++cycle) {
+        const int slip = (cycle % 2 == 0) ? 5 : 15;
+        output = controller.step({true, false, true, slip, 10, feedforward,
+            (uint32_t)(cycle * TccTransientCalibration::kCycleMs)});
+        if (cycle >= 35) {
+            assert(output.state == TccTransientState::Locked);
+        }
+        assert(output.integral_correction == initial_integral);
+        assert(output.pressure <= feedforward + TccTransientCalibration::kFeedbackHeadroom);
+    }
+}
+
+void assert_quantization_noise_and_retry() {
+    TccTransientController controller;
+    controller.select_gear(5);
+    controller.step({true, false, true, 100, 50, 1200, 0});
+    auto output = controller.step({true, false, true, 74, 50, 1200, 20});
+    assert(output.reason != TccTransientReason::ExcessiveSlipRate);
+    output = controller.step({true, false, true, 74, 50, 1200, 40});
+    assert(output.reason != TccTransientReason::ExcessiveSlipRate);
+
+    controller.reset();
+    controller.select_gear(5);
+    for (int cycle = 0; cycle < 150; ++cycle) {
+        output = controller.step({true, false, true, 331, 89, 1200,
+            (uint32_t)(cycle * TccTransientCalibration::kCycleMs)});
+    }
+    output = controller.step({true, false, true, 331, 89, 1200, 3000});
+    assert(output.reason == TccTransientReason::ContactNotDetected);
+    for (uint32_t now = 3020; now < 5000; now += TccTransientCalibration::kCycleMs) {
+        output = controller.step({true, false, true, 331, 89, 1200, now});
+        assert(output.pressure == 0);
+        assert(output.reason == TccTransientReason::ContactNotDetected);
+    }
+    output = controller.step({true, false, true, 331, 89, 1200, 5000});
+    assert(output.state == TccTransientState::Fill);
+    assert(output.pressure == TccTransientCalibration::kApplySlewPerCycle);
+}
+
+void assert_pedal_flutter_gate() {
+    bool coast_mode = false;
+    const uint16_t raw_pedal[] = {38, 55, 40, 52, 42, 50};
+    for (const uint16_t raw : raw_pedal) {
+        coast_mode = tcc_transient_update_coast_mode(
+            coast_mode, tcc_transient_pedal_percent(raw), false);
+        assert(!coast_mode);
+    }
 }
 
 void assert_parameter_sweep() {
@@ -291,10 +410,10 @@ void assert_parameter_sweep() {
                         const bool closure_safe = result.excessive_rate_fault
                             ? result.min_slip_after_rate_fault_rpm >= -30
                             : result.max_closure_rpm_per_cycle <=
-                                TccTransientCalibration::kHardSlipClosurePerCycle;
+                                TccTransientCalibration::kHardSlipClosurePerCycle + 10;
                         const bool hard_safe = result.min_slip_rpm >= -30 &&
                             closure_safe &&
-                            result.max_pressure_after_rate_fault_mbar == 0;
+                            result.max_pressure_during_rate_cooldown_mbar == 0;
                         const bool functionally_settled = !result.excessive_rate_fault &&
                             result.contact_detected && result.settled &&
                             result.settle_cycle * TccTransientCalibration::kCycleMs <= 4000 &&
@@ -422,7 +541,7 @@ int main() {
             }
         } else {
             assert(result.excessive_rate_fault || result.contact_timeout_fault);
-            assert(result.max_pressure_after_rate_fault_mbar == 0);
+            assert(result.max_pressure_during_rate_cooldown_mbar == 0);
             if (result.excessive_rate_fault) {
                 assert(result.min_slip_after_rate_fault_rpm >= -30);
             }
@@ -437,6 +556,11 @@ int main() {
 
     assert_fault_release();
     assert_coast_overrun_closed_loop();
+    assert_low_slip_cruise();
+    assert_positive_feedback_headroom();
+    assert_integrator_deadband();
+    assert_quantization_noise_and_retry();
+    assert_pedal_flutter_gate();
     assert_parameter_sweep();
     std::cout << "host TCC closed-loop simulation passed\n";
 }

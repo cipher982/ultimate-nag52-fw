@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-// Provisional V2 Phase-1 limits. Units are mbar, RPM, and milliseconds.
+// V3 transient-controller limits. Units are mbar, RPM, and milliseconds.
 namespace TccTransientCalibration {
 constexpr int kCycleMs = 20;
 constexpr int kPostShiftMinSettleMs = 100;
@@ -13,6 +13,7 @@ constexpr int kApplySlewPerCycle = 30;
 constexpr int kDemandReleaseSlewPerCycle = 400;
 constexpr int kFeedbackGain = 2;
 constexpr int kFeedbackLimit = 800;
+constexpr int kFeedbackHeadroom = 400;
 constexpr int kIntegralErrorDivisor = 8;
 constexpr int kIntegralFeedbackLimit = 600;
 constexpr int kSlipRateFeedbackGain = 10;
@@ -25,23 +26,38 @@ constexpr int kApplyTargetSlipRpm = 90;
 constexpr int kOpenTargetSlipRpm = 110;
 constexpr int kContactSearchPressure = 800;
 constexpr int kContactSeekTimeoutMs = 3000;
+constexpr int kFaultRetryCooldownMs = 2000;
+constexpr int kMaxFaultRetries = 2;
 constexpr int kMaxCommandPressure = 2000;
 constexpr int kContactClosurePerCycle = 3;
 constexpr int kContactConfirmCycles = 3;
 constexpr int kTargetSlipSlewPerCycle = 10;
+constexpr int kTargetSlipTauMs = 400;
 constexpr int kLockSlipBand = 12;
+constexpr int kLowSlipEntryRpm = 20;
 constexpr int kCoastOverrunOpenSlipRpm = 40;
-constexpr int kCoastModeEnterPedal = 15;
-constexpr int kCoastModeExitPedal = 20;
+constexpr int kCoastModeEnterPedal = 8;
+constexpr int kCoastModeExitPedal = 15;
 }
 
 inline bool tcc_transient_applies_to_gear(uint8_t gear, bool gear_enabled) {
     return gear_enabled && gear >= 2 && gear <= 5;
 }
 
-inline bool tcc_transient_update_coast_mode(bool coast_mode, uint16_t pedal_position) {
-    if (pedal_position <= TccTransientCalibration::kCoastModeEnterPedal) return true;
-    if (pedal_position >= TccTransientCalibration::kCoastModeExitPedal) return false;
+inline uint8_t tcc_transient_pedal_percent(uint16_t raw_pedal_position) {
+    const uint32_t percent = static_cast<uint32_t>(raw_pedal_position) * 100U / 250U;
+    return static_cast<uint8_t>(percent > 100U ? 100U : percent);
+}
+
+inline bool tcc_transient_update_coast_mode(bool coast_mode, uint8_t pedal_percent,
+    bool negative_torque) {
+    // Coast is a torque-direction condition with pedal hysteresis, not merely a
+    // low-pedal condition. This prevents a light positive-load cruise from
+    // repeatedly opening and reacquiring the clutch.
+    if (!negative_torque || pedal_percent >= TccTransientCalibration::kCoastModeExitPedal) {
+        return false;
+    }
+    if (pedal_percent <= TccTransientCalibration::kCoastModeEnterPedal) return true;
     return coast_mode;
 }
 
@@ -127,10 +143,15 @@ private:
     int previous_slip_rpm_ = 0;
     int previous_signed_slip_rpm_ = 0;
     int trajectory_slip_rpm_ = 0;
-    int integral_correction_ = 0;
+    int trajectory_slip_q8_ = 0;
+    int integrator_pressure_ = 0;
     int contact_confirm_cycles_ = 0;
+    int hard_closure_cycles_ = 0;
+    uint32_t fault_started_ms_ = 0;
+    uint8_t fault_retry_count_ = 0;
+    int previous_feedforward_ = 0;
     bool contact_detected_ = false;
-    bool coast_open_latched_ = false;
+    bool coast_overrun_active_ = false;
     uint8_t selected_gear_ = 0xFF;
 };
 
