@@ -93,6 +93,7 @@ void TccTransientController::reset_control_state() {
 void TccTransientController::select_gear(uint8_t gear) {
     if (gear != selected_gear_) {
         reset_control_state();
+        fault_retry_count_ = 0;
         selected_gear_ = gear;
     }
 }
@@ -136,6 +137,7 @@ TccTransientOutput TccTransientController::step(const TccTransientInput& input) 
         pressure_ = 0;
         contact_detected_ = false;
         integrator_pressure_ = 0;
+        fault_retry_count_ = 0;
         return {state_, reason_, pressure_, feedforward, 0, 0, 0, actual_slip, 0, target_slip,
             trajectory_slip_rpm_, contact_detected_};
     }
@@ -195,10 +197,10 @@ TccTransientOutput TccTransientController::step(const TccTransientInput& input) 
         pressure_ = slew(pressure_, 0, TccTransientCalibration::kDemandReleaseSlewPerCycle);
         contact_detected_ = false;
         integrator_pressure_ = 0;
+        fault_retry_count_ = 0;
         return {state_, reason_, pressure_, feedforward, 0, 0, 0, actual_slip, 0, target_slip,
             trajectory_slip_rpm_, contact_detected_};
     }
-
     reason_ = TccTransientReason::None;
     if (!already_applying) {
         state_ = TccTransientState::Fill;
@@ -318,12 +320,16 @@ TccTransientOutput TccTransientController::step(const TccTransientInput& input) 
         previous_slip_rpm_ = actual_slip;
         previous_signed_slip_rpm_ = signed_actual_slip;
         const int lock_pressure_threshold = (feedforward * 8) / 10;
-        state_ = target_slip <= TccTransientCalibration::kLockSlipBand &&
+        const bool is_locked = target_slip <= TccTransientCalibration::kLockSlipBand &&
             actual_slip <= target_slip + TccTransientCalibration::kLockSlipBand &&
-            pressure_ >= lock_pressure_threshold
-            ? TccTransientState::Locked : TccTransientState::SlipControl;
+            pressure_ >= lock_pressure_threshold;
+        if (is_locked) {
+            state_ = TccTransientState::Locked;
+            fault_retry_count_ = 0;
+        } else {
+            state_ = TccTransientState::SlipControl;
+        }
     }
-
     const int integral_correction = integrator_pressure_ - feedforward;
     return {state_, reason_, pressure_, feedforward, feedback, integral_correction, slip_rate_feedback,
         actual_slip, signed_slip_delta, target_slip,
