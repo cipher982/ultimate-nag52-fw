@@ -78,18 +78,19 @@ int main() {
     assert(tcc_transient_applies_to_gear(5, true));
     assert(!tcc_transient_applies_to_gear(2, false));
 
-    // Pedal noise around the coast boundary cannot alternate the controller
-    // between open and reacquire on consecutive samples.
+    // Coast hysteresis is expressed in normalized pedal percent and requires
+    // negative torque. Raw pedal counts are converted before this helper.
     bool coast_mode = false;
-    coast_mode = tcc_transient_update_coast_mode(coast_mode, 15);
+    assert(tcc_transient_pedal_percent(20) == 8);
+    coast_mode = tcc_transient_update_coast_mode(coast_mode, 8, true);
     assert(coast_mode);
-    coast_mode = tcc_transient_update_coast_mode(coast_mode, 16);
+    coast_mode = tcc_transient_update_coast_mode(coast_mode, 9, true);
     assert(coast_mode);
-    coast_mode = tcc_transient_update_coast_mode(coast_mode, 19);
+    coast_mode = tcc_transient_update_coast_mode(coast_mode, 14, true);
     assert(coast_mode);
-    coast_mode = tcc_transient_update_coast_mode(coast_mode, 20);
+    coast_mode = tcc_transient_update_coast_mode(coast_mode, 15, true);
     assert(!coast_mode);
-    coast_mode = tcc_transient_update_coast_mode(coast_mode, 19);
+    coast_mode = tcc_transient_update_coast_mode(coast_mode, 7, false);
     assert(!coast_mode);
 
     // With no observed shift lifecycle, normal same-gear control is released.
@@ -183,17 +184,23 @@ int main() {
     assert(contact_timeout.reason == TccTransientReason::ContactNotDetected);
     assert(contact_timeout.pressure == 0);
     assert(c.step(in(true, false, true, 331, 89, 1344, 3020)).pressure == 0);
+    auto retry = c.step(in(true, false, true, 331, 89, 1344,
+        TccTransientCalibration::kFaultRetryCooldownMs + 3000));
+    assert(retry.state == TccTransientState::Fill);
+    assert(retry.pressure == TccTransientCalibration::kApplySlewPerCycle);
 
     // Signed slip is preserved for the emergency guard. Equal magnitudes on
     // opposite sides of zero must still expose a 40 RPM pull-through.
     c.reset();
     auto positive_slip = c.step(in(true, false, true, 20, 89, 1344, 0));
-    assert(positive_slip.state == TccTransientState::Fill);
+    assert(positive_slip.state == TccTransientState::SlipControl);
     auto zero_crossing = c.step(in(true, false, true, -20, 89, 1344, 20));
-    assert(zero_crossing.state == TccTransientState::ReleaseFault);
-    assert(zero_crossing.reason == TccTransientReason::ExcessiveSlipRate);
-    assert(zero_crossing.pressure == 0);
+    assert(zero_crossing.reason != TccTransientReason::ExcessiveSlipRate);
     assert(zero_crossing.slip_delta_rpm == -40);
+    auto second_zero_crossing = c.step(in(true, false, true, -60, 89, 1344, 40));
+    assert(second_zero_crossing.state == TccTransientState::ReleaseFault);
+    assert(second_zero_crossing.reason == TccTransientReason::ExcessiveSlipRate);
+    assert(second_zero_crossing.pressure == 0);
 
     // The provisional boundary is strict: 25 RPM is accepted, 26 RPM aborts.
     c.reset();
@@ -203,8 +210,10 @@ int main() {
     c.reset();
     c.step(in(true, false, true, 100, 89, 1344, 0));
     auto over_boundary = c.step(in(true, false, true, 74, 89, 1344, 20));
-    assert(over_boundary.reason == TccTransientReason::ExcessiveSlipRate);
-    assert(over_boundary.pressure == 0);
+    assert(over_boundary.reason != TccTransientReason::ExcessiveSlipRate);
+    auto over_boundary_confirmed = c.step(in(true, false, true, 48, 89, 1344, 40));
+    assert(over_boundary_confirmed.reason == TccTransientReason::ExcessiveSlipRate);
+    assert(over_boundary_confirmed.pressure == 0);
 
     // The August 15 coast event reached large negative slip while the TCC kept
     // applying. Once coast overrun exceeds 40 RPM, hold hard-open until throttle
@@ -223,6 +232,7 @@ int main() {
     assert(stale_while_latched.state == TccTransientState::ReleaseFault);
     assert(stale_while_latched.reason == TccTransientReason::InvalidSpeed);
     auto coast_resumed = c.step(in(true, false, true, -10, 10, 1344, 80, true));
+    assert(coast_resumed.state == TccTransientState::Open);
     assert(coast_resumed.reason == TccTransientReason::CoastOverrun);
     auto tip_in_reacquire = c.step(in(true, false, true, 80, 50, 1344, 100, false));
     assert(tip_in_reacquire.state == TccTransientState::Fill);
@@ -333,5 +343,74 @@ int main() {
     auto invalid_pressure = c.step(in(true, false, true, 200, 50, 0, 0));
     assert(invalid_pressure.pressure == 0 && invalid_pressure.reason == TccTransientReason::InvalidPressure);
 
+    // Low-slip Fill entry is valid contact evidence for steady cruise and
+    // never enters the old three-second contact timeout path.
+    c.reset();
+    auto low_slip = c.step(in(true, false, true, 10, 10, 1100, 0));
+    assert(low_slip.contact_detected && low_slip.state == TccTransientState::SlipControl);
+    for (int cycle = 1; cycle < 500; ++cycle) {
+        const auto cruise = c.step(in(true, false, true, 10 + (cycle % 6) * 2,
+            10, 1100, cycle * 20));
+        assert(cruise.reason != TccTransientReason::ContactNotDetected);
+        assert(cruise.state != TccTransientState::ReleaseFault);
+        if (cycle >= 35) {
+            assert(cruise.state == TccTransientState::Locked);
+        }
+    }
+
+    // PI pressure may use the explicit 400 mbar headroom and must settle at
+    // the independent command ceiling rather than the map value.
+    c.reset();
+    c.step(in(true, false, true, 30, 10, 1100, 0));
+    c.step(in(true, false, true, 25, 10, 1100, 20));
+    c.step(in(true, false, true, 20, 10, 1100, 40));
+    int maximum_headroom_pressure = 0;
+    for (int cycle = 3; cycle < 180; ++cycle) {
+        const auto disturbance = c.step(in(true, false, true, 40, 10, 1100, cycle * 20));
+        maximum_headroom_pressure = std::max(maximum_headroom_pressure, disturbance.pressure);
+        assert(disturbance.pressure <= 1500);
+    }
+    assert(maximum_headroom_pressure == 1500);
+
+    // +/-5 RPM noise around the target is inside the integrator deadband.
+    c.reset();
+    auto deadband_start = c.step(in(true, false, true, 10, 10, 1100, 0));
+    for (int cycle = 1; cycle < 180; ++cycle) {
+        const auto noise = c.step(in(true, false, true, cycle % 2 ? 15 : 5,
+            10, 1100, cycle * 20));
+        assert(noise.integral_correction == deadband_start.integral_correction);
+    }
+
+    // Bumpless feedforward step: stepping feedforward modifies integrator
+    // baseline without a sudden jump in feedback error.
+    c.reset();
+    c.step(in(true, false, true, 10, 10, 1000, 0));
+    for (int i = 1; i < 40; ++i) c.step(in(true, false, true, 10, 10, 1000, i * 20));
+    auto before_step = c.step(in(true, false, true, 10, 10, 1000, 800));
+    auto after_step = c.step(in(true, false, true, 10, 10, 1200, 820));
+    assert(std::abs(after_step.integral_correction - before_step.integral_correction) <= 50);
+
+    // Retry limit: persistent fault retries up to 2 times, then latches open.
+    c.reset();
+    c.step(in(true, false, true, 200, 50, 1100, 0));
+    c.step(in(true, false, true, 150, 50, 1100, 20));
+    auto fault1 = c.step(in(true, false, true, 100, 50, 1100, 40));
+    assert(fault1.state == TccTransientState::ReleaseFault && fault1.reason == TccTransientReason::ExcessiveSlipRate);
+    
+    auto cooldown1 = c.step(in(true, false, true, 100, 50, 1100, 2050));
+    assert(cooldown1.state == TccTransientState::Fill);
+    c.step(in(true, false, true, 150, 50, 1100, 2070));
+    c.step(in(true, false, true, 100, 50, 1100, 2090));
+    
+    auto cooldown2 = c.step(in(true, false, true, 100, 50, 1100, 4100));
+    assert(cooldown2.state == TccTransientState::Fill);
+    c.step(in(true, false, true, 150, 50, 1100, 4120));
+    c.step(in(true, false, true, 100, 50, 1100, 4140));
+    
+    auto latched = c.step(in(true, false, true, 100, 50, 1100, 7000));
+    assert(latched.state == TccTransientState::ReleaseFault && latched.pressure == 0);
+    
+    auto cleared = c.step(in(false, false, true, 100, 50, 1100, 7020));
+    assert(cleared.reason == TccTransientReason::DemandOpen);
     std::cout << "host TCC transient tests passed\n";
 }
