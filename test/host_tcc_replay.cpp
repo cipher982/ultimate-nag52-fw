@@ -45,7 +45,37 @@ bool parse_bool(int value, const char* name, std::size_t line_number) {
     return value != 0;
 }
 
+void write_limits() {
+    std::cout << "{\n"
+              << "  \"schema\": \"tcc-command-limits-v1\",\n"
+              << "  \"cycle_ms\": " << TccTransientCalibration::kCycleMs << ",\n"
+              << "  \"slew_mbar_per_cycle\": {\n"
+              << "    \"apply\": " << TccTransientCalibration::kApplySlewPerCycle << ",\n"
+              << "    \"release\": " << TccTransientCalibration::kDemandReleaseSlewPerCycle << ",\n"
+              << "    \"feedback_relief\": " <<
+                    TccTransientCalibration::kFeedbackReliefSlewPerCycle << "\n"
+              << "  },\n"
+              << "  \"max_command_pressure_mbar\": " <<
+                    TccTransientCalibration::kMaxCommandPressure << ",\n"
+              << "  \"feedback_headroom_mbar\": " <<
+                    TccTransientCalibration::kFeedbackHeadroom << ",\n"
+              << "  \"controlled_gear\": {\n"
+              << "    \"minimum\": " << TccTransientCalibration::kMinimumControlledGear << ",\n"
+              << "    \"maximum\": " << TccTransientCalibration::kMaximumControlledGear << "\n"
+              << "  },\n"
+              << "  \"coast\": {\n"
+              << "    \"overrun_open_slip_rpm\": " <<
+                    TccTransientCalibration::kCoastOverrunOpenSlipRpm << ",\n"
+              << "    \"enter_pedal_percent\": " <<
+                    TccTransientCalibration::kCoastModeEnterPedal << ",\n"
+              << "    \"exit_pedal_percent\": " <<
+                    TccTransientCalibration::kCoastModeExitPedal << "\n"
+              << "  }\n"
+              << "}\n";
+}
+
 void replay(std::istream& input) {
+    TccTransientController controller;
     std::cout << "index now_ms state reason pressure feedforward feedback integral "
                  "rate_relief slip delta target trajectory contact\n";
 
@@ -94,7 +124,6 @@ void replay(std::istream& input) {
         const bool valid = parse_bool(speed_valid, "speed_valid", line_number);
         const bool coast = parse_bool(coast_mode, "coast_mode", line_number);
 
-        static TccTransientController controller;
         controller.select_gear(static_cast<uint8_t>(gear));
         const auto output = controller.step({
             apply,
@@ -119,8 +148,13 @@ void replay(std::istream& input) {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--limits") {
+        write_limits();
+        return 0;
+    }
     if (argc > 2 || (argc == 2 && std::string(argv[1]) == "--help")) {
         std::cerr << "usage: host_tcc_replay [input-file]\n"
+                     "       host_tcc_replay --limits\n"
                      "input columns: now_ms request_apply force_open speed_valid "
                      "signed_slip_rpm target_slip_rpm feedforward_pressure gear coast_mode\n"
                      "use '-' or no input-file for stdin\n";

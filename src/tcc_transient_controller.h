@@ -38,10 +38,13 @@ constexpr int kLowSlipEntryRpm = 20;
 constexpr int kCoastOverrunOpenSlipRpm = 40;
 constexpr int kCoastModeEnterPedal = 8;
 constexpr int kCoastModeExitPedal = 15;
+constexpr int kMinimumControlledGear = 2;
+constexpr int kMaximumControlledGear = 5;
 }
 
 inline bool tcc_transient_applies_to_gear(uint8_t gear, bool gear_enabled) {
-    return gear_enabled && gear >= 2 && gear <= 5;
+    return gear_enabled && gear >= TccTransientCalibration::kMinimumControlledGear &&
+        gear <= TccTransientCalibration::kMaximumControlledGear;
 }
 
 inline uint8_t tcc_transient_pedal_percent(uint16_t raw_pedal_position) {
