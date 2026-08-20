@@ -111,5 +111,38 @@ with C++17, warnings, and `-Werror`:
 * retry after the bounded 2000 ms fault cooldown;
 * closed-loop plant parameter sweep for comfort, tracking, and safety.
 
+### Machine-Readable Closed-Loop Result
+
+The script leaves the closed-loop simulator at
+`$BUILD_DIR/host_tcc_closed_loop` (`BUILD_DIR` defaults to `build`). Its
+ordinary no-argument invocation retains the assertion-backed human output.
+Automation can additionally request a deterministic JSON artifact:
+
+```
+BUILD_DIR="${BUILD_DIR:-build}"
+"$BUILD_DIR/host_tcc_closed_loop" --json-summary report.json
+```
+
+The artifact uses schema `tcc-closed-loop-v1`. Its `summary` object contains
+the sweep counts (`scenarios`, `qualified`, `controlled_aborts`,
+`comfort_misses`, `tracking_misses`, and `safety_failures`), while the
+top-level `scenarios` array contains the metrics for every named plant
+scenario. Within each scenario, `rate_fault_ms` is the fault time in
+milliseconds or JSON `null` when no rate fault occurred. Invalid command-line
+arguments or an unwritable output path return status 2; controller safety
+failures remain hard assertions.
+
+### Closed-Loop and Shadow-Replay Boundary
+
+This executable drives controller commands into a deterministic synthetic
+hydraulic and clutch plant, so it can exercise modeled feedback dynamics,
+including modeled oscillation and jerk. A shadow replay instead feeds the
+controller exogenous slip from a historical capture: its command invariants
+are useful, but it cannot validate the physical oscillation or jerk that those
+commands would produce. Captures carrying `tcc_transient` (RLI `0x2D`) provide
+exact controller-state telemetry for replay comparison. Legacy captures
+without it are approximate and must not be presented as exact controller
+validation.
+
 Verification result: `./scripts/test_tcc_transient.sh` passes both host test
 executables with zero assertion failures.

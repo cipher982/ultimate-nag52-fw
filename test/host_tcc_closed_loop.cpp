@@ -4,6 +4,8 @@
 #include <cassert>
 #include <cmath>
 #include <deque>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -45,6 +47,90 @@ struct ScenarioResult {
     int rate_fault_cycle = -1;
     int max_pressure_during_rate_cooldown_mbar = 0;
 };
+
+struct SweepSummary {
+    int scenarios;
+    int qualified;
+    int controlled_aborts;
+    int comfort_misses;
+    int tracking_misses;
+    int safety_failures;
+};
+
+void write_scenario_json(std::ostream& output, const ScenarioResult& result) {
+    output << "    {\n"
+           << "      \"name\": \"" << result.name << "\",\n"
+           << "      \"contact_detected\": " <<
+                (result.contact_detected ? "true" : "false") << ",\n"
+           << "      \"settled\": " << (result.settled ? "true" : "false") << ",\n"
+           << "      \"contact_ms\": " <<
+                result.contact_cycle * TccTransientCalibration::kCycleMs << ",\n"
+           << "      \"settle_ms\": " <<
+                result.settle_cycle * TccTransientCalibration::kCycleMs << ",\n"
+           << "      \"max_pressure_mbar\": " << result.max_pressure_mbar << ",\n"
+           << "      \"max_closure_rpm_per_cycle\": " <<
+                result.max_closure_rpm_per_cycle << ",\n"
+           << "      \"min_slip_rpm\": " << result.min_slip_rpm << ",\n"
+           << "      \"final_slip_rpm\": " << result.final_slip_rpm << ",\n"
+           << "      \"max_target_error_last_second_rpm\": " <<
+                result.max_target_error_last_second_rpm << ",\n"
+           << "      \"max_negative_rate_correction_mbar\": " <<
+                result.max_negative_rate_correction_mbar << ",\n"
+           << "      \"max_pressure_after_rate_fault_mbar\": " <<
+                result.max_pressure_after_rate_fault_mbar << ",\n"
+           << "      \"max_closure_after_rate_fault_rpm\": " <<
+                result.max_closure_after_rate_fault_rpm << ",\n"
+           << "      \"min_slip_after_rate_fault_rpm\": " <<
+                result.min_slip_after_rate_fault_rpm << ",\n"
+           << "      \"max_hydraulic_pressure_after_rate_fault_mbar\": " <<
+                std::fixed << std::setprecision(3) <<
+                result.max_hydraulic_pressure_after_rate_fault_mbar << ",\n"
+           << "      \"excessive_rate_fault\": " <<
+                (result.excessive_rate_fault ? "true" : "false") << ",\n"
+           << "      \"contact_timeout_fault\": " <<
+                (result.contact_timeout_fault ? "true" : "false") << ",\n"
+           << "      \"rate_fault_ms\": ";
+    if (result.rate_fault_cycle >= 0) {
+        output << result.rate_fault_cycle * TccTransientCalibration::kCycleMs;
+    } else {
+        output << "null";
+    }
+    output << ",\n"
+           << "      \"max_pressure_during_rate_cooldown_mbar\": " <<
+                result.max_pressure_during_rate_cooldown_mbar << "\n"
+           << "    }";
+}
+
+bool write_json_summary(
+    const char* path,
+    const std::vector<ScenarioResult>& results,
+    const SweepSummary& summary
+) {
+    std::ofstream output(path);
+    if (!output) return false;
+
+    output << "{\n"
+           << "  \"schema\": \"tcc-closed-loop-v1\",\n"
+           << "  \"passed\": " <<
+                (summary.safety_failures == 0 ? "true" : "false") << ",\n"
+           << "  \"summary\": {\n"
+           << "    \"scenarios\": " << summary.scenarios << ",\n"
+           << "    \"qualified\": " << summary.qualified << ",\n"
+           << "    \"controlled_aborts\": " << summary.controlled_aborts << ",\n"
+           << "    \"comfort_misses\": " << summary.comfort_misses << ",\n"
+           << "    \"tracking_misses\": " << summary.tracking_misses << ",\n"
+           << "    \"safety_failures\": " << summary.safety_failures << "\n"
+           << "  },\n"
+           << "  \"scenarios\": [\n";
+    for (size_t index = 0; index < results.size(); ++index) {
+        write_scenario_json(output, results[index]);
+        output << (index + 1 == results.size() ? "\n" : ",\n");
+    }
+    output << "  ]\n"
+           << "}\n";
+    output.close();
+    return output.good();
+}
 
 class SimpleTccPlant {
 public:
@@ -368,7 +454,7 @@ void assert_pedal_flutter_gate() {
     }
 }
 
-void assert_parameter_sweep() {
+SweepSummary assert_parameter_sweep() {
     constexpr int kComfortClosureRpmPerCycle = 12;
     const double contact_pressures[] = {600.0, 700.0, 750.0};
     const double clutch_gains[] = {1.5, 3.0, 5.0};
@@ -489,11 +575,26 @@ void assert_parameter_sweep() {
     assert(safety_failures == 0);
     assert(qualified > 0);
     assert(comfort_misses > 0);
+    return {
+        scenarios,
+        qualified,
+        controlled_aborts,
+        comfort_misses,
+        tracking_misses,
+        safety_failures,
+    };
 }
 
 }
 
-int main() {
+int main(int argc, char** argv) {
+    const char* json_summary_path = nullptr;
+    if (argc == 3 && std::string(argv[1]) == "--json-summary" && argv[2][0] != '\0') {
+        json_summary_path = argv[2];
+    } else if (argc != 1) {
+        std::cerr << "usage: " << argv[0] << " [--json-summary PATH]\n";
+        return 2;
+    }
     const std::vector<PlantProfile> profiles = {
         {"nominal", 700, 3.0, 80, 2, 260, 300, 0, 0.50, 1200, true},
         {"sharp-controlled-abort", 750, 5.0, 40, 1, 260, 300, 0, 0.45, 1300, false},
@@ -504,6 +605,9 @@ int main() {
         {"true-no-contact", 1500, 3.0, 80, 2, 260, 300, 0, 0.50, 1400, false},
         {"falling-slip-true-no-contact", 1500, 3.0, 80, 2, 243, 243, -35, 0.50, 1400, false},
     };
+
+    std::vector<ScenarioResult> results;
+    results.reserve(profiles.size());
 
     for (const auto& profile : profiles) {
         const ScenarioResult result = run_apply(profile);
@@ -552,6 +656,7 @@ int main() {
                     TccTransientCalibration::kContactSearchPressure));
             }
         }
+        results.push_back(result);
     }
 
     assert_fault_release();
@@ -561,6 +666,12 @@ int main() {
     assert_integrator_deadband();
     assert_quantization_noise_and_retry();
     assert_pedal_flutter_gate();
-    assert_parameter_sweep();
+    const SweepSummary summary = assert_parameter_sweep();
+    if (json_summary_path != nullptr &&
+        !write_json_summary(json_summary_path, results, summary)) {
+        std::cerr << "failed to write JSON summary: " << json_summary_path << '\n';
+        return 2;
+    }
     std::cout << "host TCC closed-loop simulation passed\n";
+    return 0;
 }
