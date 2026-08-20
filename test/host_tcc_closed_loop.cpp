@@ -1,3 +1,7 @@
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
+
 #include "tcc_transient_controller.h"
 
 #include <algorithm>
@@ -7,7 +11,9 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -48,14 +54,48 @@ struct ScenarioResult {
     int max_pressure_during_rate_cooldown_mbar = 0;
 };
 
-struct SweepSummary {
-    int scenarios;
-    int qualified;
-    int controlled_aborts;
-    int comfort_misses;
-    int tracking_misses;
-    int safety_failures;
+struct SweepCell {
+    std::string id;
+    PlantProfile profile;
+    ScenarioResult result;
+    std::string classification;
 };
+
+struct SweepSummary {
+    int scenarios = 0;
+    int qualified = 0;
+    int controlled_aborts = 0;
+    int comfort_misses = 0;
+    int tracking_misses = 0;
+    int safety_failures = 0;
+    bool conservation_passed = false;
+    bool regression_passed = false;
+    bool machine_passed = false;
+    std::vector<SweepCell> cells;
+};
+
+constexpr int kSweepCellCount = 216;
+constexpr int kBaselineQualifiedMinimum = 15;
+constexpr int kBaselineControlledAbortsMaximum = 100;
+constexpr int kBaselineComfortMissesMaximum = 93;
+constexpr int kBaselineTrackingMissesMaximum = 8;
+constexpr int kBaselineSafetyFailuresExact = 0;
+
+std::string sweep_cell_id(
+    double contact_pressure,
+    double clutch_gain,
+    double hydraulic_tau_ms,
+    int hydraulic_delay,
+    int feedforward_pressure
+) {
+    std::ostringstream id;
+    id << "sweep-cp" << static_cast<int>(std::lround(contact_pressure))
+       << "-g" << static_cast<int>(std::lround(clutch_gain * 10.0))
+       << "-tau" << static_cast<int>(std::lround(hydraulic_tau_ms))
+       << "-d" << hydraulic_delay
+       << "-ff" << feedforward_pressure;
+    return id.str();
+}
 
 void write_scenario_json(std::ostream& output, const ScenarioResult& result) {
     output << "    {\n"
@@ -110,21 +150,107 @@ bool write_json_summary(
     if (!output) return false;
 
     output << "{\n"
-           << "  \"schema\": \"tcc-closed-loop-v1\",\n"
+           << "  \"schema\": \"tcc-closed-loop-v2\",\n"
            << "  \"passed\": " <<
-                (summary.safety_failures == 0 ? "true" : "false") << ",\n"
+                (summary.machine_passed ? "true" : "false") << ",\n"
+           << "  \"hard_controller_verdict\": \"" <<
+                (summary.safety_failures == kBaselineSafetyFailuresExact ? "PASS" : "FAIL")
+           << "\",\n"
+           << "  \"baseline_regression_verdict\": \"" <<
+                (summary.regression_passed ? "PASS" : "FAIL") << "\",\n"
            << "  \"summary\": {\n"
            << "    \"scenarios\": " << summary.scenarios << ",\n"
+           << "    \"sweep_cells\": " << summary.cells.size() << ",\n"
            << "    \"qualified\": " << summary.qualified << ",\n"
            << "    \"controlled_aborts\": " << summary.controlled_aborts << ",\n"
            << "    \"comfort_misses\": " << summary.comfort_misses << ",\n"
            << "    \"tracking_misses\": " << summary.tracking_misses << ",\n"
-           << "    \"safety_failures\": " << summary.safety_failures << "\n"
+           << "    \"safety_failures\": " << summary.safety_failures << ",\n"
+           << "    \"baseline_regression_budget\": {\n"
+           << "      \"provenance\": \"baseline_regression_budget\",\n"
+           << "      \"qualified_minimum\": " << kBaselineQualifiedMinimum << ",\n"
+           << "      \"controlled_aborts_maximum\": " <<
+                kBaselineControlledAbortsMaximum << ",\n"
+           << "      \"comfort_misses_maximum\": " <<
+                kBaselineComfortMissesMaximum << ",\n"
+           << "      \"tracking_misses_maximum\": " <<
+                kBaselineTrackingMissesMaximum << ",\n"
+           << "      \"safety_failures_exact\": " <<
+                kBaselineSafetyFailuresExact << ",\n"
+           << "      \"passed\": " <<
+                (summary.regression_passed ? "true" : "false") << "\n"
+           << "    }\n"
            << "  },\n"
            << "  \"scenarios\": [\n";
     for (size_t index = 0; index < results.size(); ++index) {
         write_scenario_json(output, results[index]);
         output << (index + 1 == results.size() ? "\n" : ",\n");
+    }
+    output << "  ],\n"
+           << "  \"sweep_cells\": [\n";
+    for (size_t index = 0; index < summary.cells.size(); ++index) {
+        const auto& cell = summary.cells[index];
+        output << "    {\n"
+               << "      \"id\": \"" << cell.id << "\",\n"
+               << "      \"plant\": {\n"
+               << "        \"contact_pressure_mbar\": " << std::fixed <<
+                    std::setprecision(3) << cell.profile.contact_pressure_mbar << ",\n"
+               << "        \"clutch_gain_rpm_per_second_per_mbar\": " <<
+                    cell.profile.clutch_gain_rpm_per_second_per_mbar << ",\n"
+               << "        \"hydraulic_tau_ms\": " << cell.profile.hydraulic_tau_ms << ",\n"
+               << "        \"hydraulic_delay_cycles\": " <<
+                    cell.profile.hydraulic_delay_cycles << ",\n"
+               << "        \"initial_slip_rpm\": " << cell.profile.initial_slip_rpm << ",\n"
+               << "        \"free_slip_rpm\": " << cell.profile.free_slip_rpm << ",\n"
+               << "        \"free_slip_ramp_rpm_per_second\": " <<
+                    cell.profile.free_slip_ramp_rpm_per_second << ",\n"
+               << "        \"free_slip_tau_seconds\": " <<
+                    cell.profile.free_slip_tau_seconds << ",\n"
+               << "        \"feedforward_pressure_mbar\": " <<
+                    cell.profile.feedforward_pressure_mbar << "\n"
+               << "      },\n"
+               << "      \"metrics\": {\n"
+               << "        \"contact_detected\": " <<
+                    (cell.result.contact_detected ? "true" : "false") << ",\n"
+               << "        \"settled\": " <<
+                    (cell.result.settled ? "true" : "false") << ",\n"
+               << "        \"contact_ms\": " <<
+                    cell.result.contact_cycle * TccTransientCalibration::kCycleMs << ",\n"
+               << "        \"settle_ms\": " <<
+                    cell.result.settle_cycle * TccTransientCalibration::kCycleMs << ",\n"
+               << "        \"max_pressure_mbar\": " << cell.result.max_pressure_mbar << ",\n"
+               << "        \"max_closure_rpm_per_cycle\": " <<
+                    cell.result.max_closure_rpm_per_cycle << ",\n"
+               << "        \"min_slip_rpm\": " << cell.result.min_slip_rpm << ",\n"
+               << "        \"final_slip_rpm\": " << cell.result.final_slip_rpm << ",\n"
+               << "        \"max_target_error_last_second_rpm\": " <<
+                    cell.result.max_target_error_last_second_rpm << ",\n"
+               << "        \"max_negative_rate_correction_mbar\": " <<
+                    cell.result.max_negative_rate_correction_mbar << ",\n"
+               << "        \"max_pressure_after_rate_fault_mbar\": " <<
+                    cell.result.max_pressure_after_rate_fault_mbar << ",\n"
+               << "        \"max_closure_after_rate_fault_rpm\": " <<
+                    cell.result.max_closure_after_rate_fault_rpm << ",\n"
+               << "        \"min_slip_after_rate_fault_rpm\": " <<
+                    cell.result.min_slip_after_rate_fault_rpm << ",\n"
+               << "        \"max_hydraulic_pressure_after_rate_fault_mbar\": " <<
+                    cell.result.max_hydraulic_pressure_after_rate_fault_mbar << ",\n"
+               << "        \"excessive_rate_fault\": " <<
+                    (cell.result.excessive_rate_fault ? "true" : "false") << ",\n"
+               << "        \"contact_timeout_fault\": " <<
+                    (cell.result.contact_timeout_fault ? "true" : "false") << ",\n"
+               << "        \"rate_fault_ms\": ";
+        if (cell.result.rate_fault_cycle >= 0) {
+            output << cell.result.rate_fault_cycle * TccTransientCalibration::kCycleMs;
+        } else {
+            output << "null";
+        }
+        output << ",\n"
+               << "        \"max_pressure_during_rate_cooldown_mbar\": " <<
+                    cell.result.max_pressure_during_rate_cooldown_mbar << "\n"
+               << "      },\n"
+               << "      \"classification\": \"" << cell.classification << "\"\n"
+               << "    }" << (index + 1 == summary.cells.size() ? "\n" : ",\n");
     }
     output << "  ]\n"
            << "}\n";
@@ -469,6 +595,8 @@ SweepSummary assert_parameter_sweep() {
     int safety_failures = 0;
     int printed_safety_failures = 0;
     int printed_comfort_misses = 0;
+    std::vector<SweepCell> cells;
+    cells.reserve(kSweepCellCount);
 
     for (const double contact_pressure : contact_pressures) {
         for (const double clutch_gain : clutch_gains) {
@@ -510,7 +638,9 @@ SweepSummary assert_parameter_sweep() {
                         const bool passed = functionally_settled &&
                             result.max_closure_rpm_per_cycle <= kComfortClosureRpmPerCycle;
                         scenarios += 1;
+                        std::string classification;
                         if (!hard_safe) {
+                            classification = "safety_failure";
                             if (printed_safety_failures < 8) {
                                 std::cout << "safety failure contact=" << contact_pressure
                                           << " gain=" << clutch_gain
@@ -528,10 +658,13 @@ SweepSummary assert_parameter_sweep() {
                             }
                             safety_failures += 1;
                         } else if (passed) {
+                            classification = "qualified";
                             qualified += 1;
                         } else if (result.excessive_rate_fault || result.contact_timeout_fault) {
+                            classification = "controlled_abort";
                             controlled_aborts += 1;
                         } else if (functionally_settled) {
+                            classification = "comfort_miss";
                             if (printed_comfort_misses < 4) {
                                 std::cout << "comfort miss contact=" << contact_pressure
                                           << " gain=" << clutch_gain
@@ -544,6 +677,7 @@ SweepSummary assert_parameter_sweep() {
                             }
                             comfort_misses += 1;
                         } else {
+                            classification = "tracking_miss";
                             if (tracking_misses < 4) {
                                 std::cout << "tracking miss contact=" << contact_pressure
                                           << " gain=" << clutch_gain
@@ -558,6 +692,14 @@ SweepSummary assert_parameter_sweep() {
                             }
                             tracking_misses += 1;
                         }
+                        cells.push_back({
+                            sweep_cell_id(
+                                contact_pressure, clutch_gain, hydraulic_tau_ms,
+                                hydraulic_delay, feedforward_pressure),
+                            profile,
+                            result,
+                            classification,
+                        });
                     }
                 }
             }
@@ -568,13 +710,24 @@ SweepSummary assert_parameter_sweep() {
               << " qualified=" << qualified
               << " controlled_aborts=" << controlled_aborts
               << " comfort_misses=" << comfort_misses
-              << " tracking_misses=" << tracking_misses
-              << " safety_failures=" << safety_failures << '\n';
-    assert(qualified + controlled_aborts + comfort_misses + tracking_misses +
-        safety_failures == scenarios);
-    assert(safety_failures == 0);
-    assert(qualified > 0);
-    assert(comfort_misses > 0);
+               << " tracking_misses=" << tracking_misses
+               << " safety_failures=" << safety_failures << '\n';
+    const bool conservation_passed = scenarios == kSweepCellCount &&
+        cells.size() == static_cast<size_t>(kSweepCellCount) &&
+        qualified + controlled_aborts + comfort_misses + tracking_misses +
+            safety_failures == kSweepCellCount;
+    const bool regression_passed = qualified >= kBaselineQualifiedMinimum &&
+        controlled_aborts <= kBaselineControlledAbortsMaximum &&
+        comfort_misses <= kBaselineComfortMissesMaximum &&
+        tracking_misses <= kBaselineTrackingMissesMaximum &&
+        safety_failures == kBaselineSafetyFailuresExact;
+    const bool machine_passed = conservation_passed && regression_passed;
+    if (!conservation_passed) {
+        std::cerr << "parameter sweep failed cell conservation\n";
+    }
+    if (!regression_passed) {
+        std::cerr << "parameter sweep failed baseline regression budget\n";
+    }
     return {
         scenarios,
         qualified,
@@ -582,6 +735,10 @@ SweepSummary assert_parameter_sweep() {
         comfort_misses,
         tracking_misses,
         safety_failures,
+        conservation_passed,
+        regression_passed,
+        machine_passed,
+        std::move(cells),
     };
 }
 
@@ -671,6 +828,10 @@ int main(int argc, char** argv) {
         !write_json_summary(json_summary_path, results, summary)) {
         std::cerr << "failed to write JSON summary: " << json_summary_path << '\n';
         return 2;
+    }
+    if (!summary.machine_passed) {
+        std::cerr << "host TCC closed-loop simulation failed machine verdict\n";
+        return 1;
     }
     std::cout << "host TCC closed-loop simulation passed\n";
     return 0;

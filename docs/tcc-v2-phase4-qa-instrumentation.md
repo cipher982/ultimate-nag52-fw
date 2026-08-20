@@ -12,15 +12,29 @@ does not authorize a vehicle flash.
   fail-open latch through the measured -327 RPM regime, and verifies that
   throttle return starts a fresh bounded Fill step.
 - Coast-mode pedal detection now has provisional hysteresis: enter at pedal
-  15 or below, retain the mode through 16-19, and exit at 20 or above. This
+  8 or below and exit at 15 or above. This
   prevents one-count pedal noise from alternating open and reacquire commands.
 - Unit tests cover the exact -40/-41 RPM overrun boundary and prove that an
   invalid speed sample fails open as `InvalidSpeed` rather than mutating the
   overrun latch.
 
-The 216-case plant sweep remains 21 comfort-qualified, 110 controlled aborts,
-84 functional-but-too-fast comfort misses, one tracking miss, and zero modeled
-safety failures. These are software-model results, not vehicle validation.
+The closed-loop artifact is schema `tcc-closed-loop-v2` and emits all 216
+parameter cells. The initial baseline regression budget is qualified >= 15,
+controlled aborts <= 100, comfort misses <= 93, tracking misses <= 8, and
+safety failures == 0. These are regression budgets with no vehicle-measured
+provenance, not vehicle acceptance limits. Each cell carries its plant
+parameters, result metrics, and one of the five legal classifications; summary
+totals must conserve exactly 216.
+
+The host replay binary also emits `tcc-command-limits-v1` from
+`TccTransientCalibration` with cycle time, apply/release/relief slew, pressure
+ceiling, feedback headroom, controlled gears, and coast thresholds. Replay hard
+gates consume this artifact rather than a copied Python calibration.
+
+Historical FFT and jerk remain raw exogenous observations with status `INFO` or
+`NOT_EVALUATED`; they are not controller or comfort gates. The closed-loop
+safety verdict, baseline regression result, replay hard gates, and evidence
+sufficiency are separate fields in the machine artifact.
 
 ## Read-only controller trace
 

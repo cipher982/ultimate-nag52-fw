@@ -123,14 +123,20 @@ BUILD_DIR="${BUILD_DIR:-build}"
 "$BUILD_DIR/host_tcc_closed_loop" --json-summary report.json
 ```
 
-The artifact uses schema `tcc-closed-loop-v1`. Its `summary` object contains
-the sweep counts (`scenarios`, `qualified`, `controlled_aborts`,
-`comfort_misses`, `tracking_misses`, and `safety_failures`), while the
-top-level `scenarios` array contains the metrics for every named plant
-scenario. Within each scenario, `rate_fault_ms` is the fault time in
-milliseconds or JSON `null` when no rate fault occurred. Invalid command-line
-arguments or an unwritable output path return status 2; controller safety
-failures remain hard assertions.
+The artifact uses schema `tcc-closed-loop-v2`. Its `summary` object contains
+the sweep counts and a `baseline_regression_budget`; the `sweep_cells` array
+contains exactly 216 unique plant cells, each with plant parameters, metrics,
+and one legal classification. Summary classifications must conserve exactly
+216. The baseline budget is qualified >= 15, controlled aborts <= 100, comfort
+misses <= 93, tracking misses <= 8, and safety failures == 0. It is a
+regression budget, not a vehicle acceptance limit. Invalid command-line
+arguments or an unwritable output path return status 2; the machine verdict is
+explicit and remains hard when the build is compiled with `NDEBUG`.
+
+`host_tcc_replay --limits` emits `tcc-command-limits-v1` directly from
+`TccTransientCalibration`. Replay consumers must validate and use that artifact
+for command limits, controlled gears, and coast thresholds rather than copying
+calibration values.
 
 ### Closed-Loop and Shadow-Replay Boundary
 
