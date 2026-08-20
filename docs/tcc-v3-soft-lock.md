@@ -97,8 +97,9 @@ to protect the hydraulic plant.
 
 ## Verification Matrix
 
-The host script `scripts/test_tcc_transient.sh` builds both native binaries
-with C++17, warnings, and `-Werror`:
+The host script `scripts/test_tcc_transient.sh` builds and runs all three native
+host executables with C++17, warnings, and `-Werror`: `host_tcc_transient`,
+`host_tcc_closed_loop`, and `host_tcc_replay`. Together they cover:
 
 * shift settling, gear reset, target hysteresis, invalid inputs, and pressure
   bounds;
@@ -129,26 +130,40 @@ contains exactly 216 unique plant cells, each with plant parameters, metrics,
 and one legal classification. Summary classifications must conserve exactly
 216. The baseline budget is qualified >= 15, controlled aborts <= 100, comfort
 misses <= 93, tracking misses <= 8, and safety failures == 0. It is a
-regression budget, not a vehicle acceptance limit. Invalid command-line
-arguments or an unwritable output path return status 2; the machine verdict is
-explicit and remains hard when the build is compiled with `NDEBUG`.
+regression budget for the synthetic plant, not a vehicle acceptance limit.
+Invalid command-line arguments or an unwritable output path return status 2;
+the machine verdict is explicit and remains hard under `NDEBUG`.
 
-`host_tcc_replay --limits` emits `tcc-command-limits-v1` directly from
-`TccTransientCalibration`. Replay consumers must validate and use that artifact
-for command limits, controlled gears, and coast thresholds rather than copying
-calibration values.
+`host_tcc_replay --limits` emits `tcc-command-limits-v1` directly from the
+compiled `TccTransientCalibration`. Replay consumers validate and use that
+artifact for command limits, controlled gears, and coast thresholds rather
+than copying calibration values.
 
 ### Closed-Loop and Shadow-Replay Boundary
 
-This executable drives controller commands into a deterministic synthetic
-hydraulic and clutch plant, so it can exercise modeled feedback dynamics,
-including modeled oscillation and jerk. A shadow replay instead feeds the
-controller exogenous slip from a historical capture: its command invariants
-are useful, but it cannot validate the physical oscillation or jerk that those
-commands would produce. Captures carrying `tcc_transient` (RLI `0x2D`) provide
-exact controller-state telemetry for replay comparison. Legacy captures
-without it are approximate and must not be presented as exact controller
-validation.
+The closed-loop executable drives controller commands into a deterministic
+synthetic hydraulic and clutch plant, so it can exercise modeled feedback
+dynamics, including modeled oscillation and jerk. A shadow replay instead
+feeds the controller exogenous slip from a historical capture. A replay hard
+PASS on such data is `APPROXIMATE_EXOGENOUS`: it establishes command
+invariants against those inputs, not physical oscillation, jerk, controller,
+or vehicle approval.
 
-Verification result: `./scripts/test_tcc_transient.sh` passes both host test
-executables with zero assertion failures.
+Captures carrying `tcc_transient` (RLI `0x2D`) provide exact controller-state
+telemetry for replay comparison. Legacy captures without it remain
+approximate and must not be presented as exact controller evidence.
+
+## Current Vehicle Evidence Gate
+
+V2 commit `a619e59` is installed and was driven home. The owner's highway
+oscillation observation is useful subjective evidence, but no authoritative
+20 ms RLI `0x2D` road capture exists yet. V3 branch `bf4e3fb` is implemented
+and pushed but has not been flashed.
+
+The next action is staged V2 evidence collection: Park, then a 20-foot crawl,
+then a short loop captured with `--v2-transient-data`. Review that exact trace
+before revisiting any V3 flash decision.
+
+Verification result: `./scripts/test_tcc_transient.sh` completes successfully
+for all three host executables. This host result is not a full target build or
+vehicle validation.
