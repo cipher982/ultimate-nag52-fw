@@ -10,6 +10,7 @@
 #include "pressure_manager.h"
 #include "canbus/can_hal.h"
 #include "nvs/module_settings.h"
+#include "tcc_direct_slip_controller.h"
 
 enum class InternalTccState {
     Open = 0,
@@ -31,7 +32,8 @@ class TorqueConverter {
          * @param sensors Sensor data used as input
          * @param shifting True if the car is currently transitioning to new gear
          */
-        void update(GearboxGear curr_gear, GearboxGear targ_gear, PressureManager* pm, AbstractProfile* profile, SensorData* sensors);
+        void update(GearboxGear curr_gear, GearboxGear targ_gear, PressureManager* pm,
+            AbstractProfile* profile, SensorData* sensors, bool engine_speed_fresh);
         TccClutchStatus get_clutch_state(void);
         void save() {
             if (this->tcc_lock_map) {
@@ -57,6 +59,17 @@ class TorqueConverter {
         uint8_t get_can_req_bits();
         uint16_t get_current_pressure();
         uint16_t get_target_pressure();
+        TccDirectSlipOutput get_direct_slip_snapshot() const {
+            return this->direct_slip_snapshot;
+        }
+        void clear_direct_slip_fault() {
+            this->direct_slip_controller.clear_fault();
+            this->direct_slip_snapshot = this->direct_slip_controller.snapshot();
+        }
+        void reset_direct_slip_nonfault_state() {
+            this->direct_slip_controller.reset_nonfault_state();
+            this->direct_slip_snapshot = this->direct_slip_controller.snapshot();
+        }
         uint16_t get_slip_targ() {
             return this->slip_target;
         }
@@ -117,6 +130,8 @@ class TorqueConverter {
         bool prefill_done = false;
         bool prefill_running = false;
         uint8_t prefill_cycles = 0;
+        TccDirectSlipController direct_slip_controller;
+        TccDirectSlipOutput direct_slip_snapshot = {};
 };
 
 #endif

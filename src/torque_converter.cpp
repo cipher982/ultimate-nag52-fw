@@ -9,6 +9,7 @@
 #include "common_structs_ops.h"
 #include "egs_calibration/calibration_structs.h"
 #include "tcc_adaptation.h"
+#include "esp_timer.h"
 
 #define LOAD_SIZE TCC_SLIP_ADAPT_MAP_SIZE/5
 
@@ -86,8 +87,11 @@ void TorqueConverter::calc_pid_score() {
 
 }
 
-void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, PressureManager* pm, AbstractProfile* profile, SensorData* sensors) {
-    int slip_now = abs((int32_t)sensors->engine_rpm-(int32_t)sensors->input_rpm);
+void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
+    PressureManager* pm, AbstractProfile* profile, SensorData* sensors,
+    bool engine_speed_fresh) {
+    const int signed_slip_now = (int32_t)sensors->engine_rpm-(int32_t)sensors->input_rpm;
+    int slip_now = abs(signed_slip_now);
     int motor_torque = sensors->converted_torque;
     int load_as_percent = abs(((int)motor_torque*100) / this->rated_max_torque);
     this->engine_load_percent = load_as_percent;
@@ -221,6 +225,66 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
         this->absorbed_power_joule = this->engine_output_joule - (this->engine_output_joule * rpm_as_percent);
     } else {
         this->absorbed_power_joule = 0;
+    }
+
+    // V4 is intentionally isolated to D2. It does not infer contact or consult
+    // a learned pressure map: signed slip error directly integrates pressure
+    // from zero. The reference controller remains unchanged in D1/D3-D5.
+    const bool direct_d2_selected =
+        curr_gear == GearboxGear::Second && TCC_CURRENT_SETTINGS.enable_d2;
+    TccDirectSlipReason direct_inhibit = TccDirectSlipReason::None;
+    if (is_shifting) {
+        direct_inhibit = TccDirectSlipReason::ShiftActive;
+    } else if (curr_gear != targ_gear) {
+        direct_inhibit = TccDirectSlipReason::GearMismatch;
+    } else if (sensors->input_torque <= 0) {
+        direct_inhibit = TccDirectSlipReason::NonPositiveTorque;
+    }
+    const bool direct_request = direct_d2_selected &&
+        this->target_tcc_state != InternalTccState::Open &&
+        direct_inhibit == TccDirectSlipReason::None;
+    const bool direct_speed_valid = engine_speed_fresh &&
+        sensors->engine_rpm > 400 && sensors->engine_rpm != UINT16_MAX &&
+        sensors->input_rpm > 0 && sensors->input_rpm != UINT16_MAX;
+    this->direct_slip_snapshot = this->direct_slip_controller.step({
+        direct_d2_selected,
+        direct_request,
+        direct_speed_valid,
+        direct_inhibit,
+        signed_slip_now,
+        this->slip_target,
+        static_cast<uint32_t>(esp_timer_get_time() / 1000ULL),
+    });
+
+    if (direct_d2_selected) {
+        this->prefill_done = false;
+        this->prefill_running = false;
+        this->tcc_commanded_pressure = this->direct_slip_snapshot.pressure_mbar;
+        if (this->direct_slip_snapshot.state == TccDirectSlipState::Tracking) {
+            this->current_tcc_state = this->target_tcc_state;
+        } else {
+            this->current_tcc_state = this->direct_slip_snapshot.pressure_mbar > 0
+                ? InternalTccState::Slipping : InternalTccState::Open;
+            if (this->direct_slip_snapshot.state == TccDirectSlipState::Open ||
+                this->direct_slip_snapshot.state == TccDirectSlipState::ShiftInhibit ||
+                this->direct_slip_snapshot.state == TccDirectSlipState::FaultOpen) {
+                this->target_tcc_state = InternalTccState::Open;
+            }
+        }
+        if (!is_shifting && was_shifting) {
+            was_shifting = false;
+        }
+        // Preserve the reference firmware's cold-fluid actuator correction.
+        // RLI 0x2D reports both this controller output and the post-correction
+        // solenoid command so a timeout cannot hide behind the correction.
+        if (sensors->atf_temp < TCC_CURRENT_SETTINGS.tcc_temp_multiplier.raw_max) {
+            float mul = interpolate_float(sensors->atf_temp,
+                &TCC_CURRENT_SETTINGS.tcc_temp_multiplier, InterpType::Linear);
+            this->tcc_commanded_pressure =
+                (float)this->tcc_commanded_pressure * mul;
+        }
+        pm->set_target_tcc_pressure(this->tcc_commanded_pressure);
+        return;
     }
 
     bool is_adaptable = abs(this->tcc_commanded_pressure-this->tcc_actual_pressure/100) < 2;

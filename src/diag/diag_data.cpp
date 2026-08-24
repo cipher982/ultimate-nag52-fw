@@ -111,6 +111,32 @@ DATA_TCC_PROGRAM get_tcc_program_data(Gearbox* gb_ptr) {
     return ret;
 }
 
+DATA_TCC_DIRECT_SLIP get_tcc_direct_slip_data(Gearbox* gb_ptr) {
+    DATA_TCC_DIRECT_SLIP ret = {};
+    const TccDirectSlipOutput snapshot = gb_ptr->tcc->get_direct_slip_snapshot();
+    ret.state = static_cast<uint8_t>(snapshot.state);
+    ret.reason = static_cast<uint8_t>(snapshot.reason);
+    ret.flags = 0x40;
+    if (snapshot.fault_latched) {
+        ret.flags |= 0x01;
+    }
+    if (snapshot.tracking_achieved) {
+        ret.flags |= 0x02;
+    }
+    ret.pedal_position = gb_ptr->sensor_data.pedal_pos;
+    ret.signed_slip_rpm = static_cast<int16_t>(snapshot.signed_slip_rpm);
+    ret.slip_error_rpm = static_cast<int16_t>(snapshot.slip_error_rpm);
+    ret.target_slip_rpm = static_cast<uint16_t>(snapshot.target_slip_rpm);
+    ret.nontracking_ms = static_cast<uint16_t>(snapshot.nontracking_ms);
+    ret.controller_pressure_mbar = static_cast<uint16_t>(snapshot.pressure_mbar);
+    ret.commanded_pressure_mbar = gb_ptr->tcc->get_target_pressure();
+    ret.pressure_delta_mbar =
+        static_cast<int16_t>(snapshot.pressure_delta_mbar);
+    ret.tracking_band_rpm = TccDirectSlipCalibration::kTrackingBandRpm;
+    ret.timeout_ms = TccDirectSlipCalibration::kNonTrackingTimeoutMs;
+    return ret;
+}
+
 DATA_CANBUS_RX get_rx_can_data(EgsBaseCan* can_layer) {
     DATA_CANBUS_RX ret = {};
     if (can_layer == nullptr || gearbox == nullptr) {

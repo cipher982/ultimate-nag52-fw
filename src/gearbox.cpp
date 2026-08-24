@@ -1005,6 +1005,8 @@ void Gearbox::controller_loop()
         sensor_data.brake_pressed = brake_pedal.is_brake_pedal_pressed(egs_can_hal, 250);
         sensor_data.kickdown_pressed = kickdown.is_kickdown_newly_pressed(egs_can_hal, 250);
         int tmp_rpm = 0;
+        const bool engine_speed_fresh =
+            egs_can_hal->get_engine_rpm(100) != UINT16_MAX;
         tmp_rpm = egs_can_hal->get_engine_rpm(1000);
         if (tmp_rpm == UINT16_MAX)
         {
@@ -1221,13 +1223,36 @@ void Gearbox::controller_loop()
                 {
                     if (this->tcc != nullptr)
                     {
-                        this->tcc->update(this->actual_gear, this->target_gear, this->pressure_mgr, this->current_profile, &this->sensor_data);
+                        this->tcc->update(this->actual_gear, this->target_gear,
+                            this->pressure_mgr, this->current_profile,
+                            &this->sensor_data, engine_speed_fresh);
                         egs_can_hal->set_clutch_status(this->tcc->get_clutch_state());
                     }
+                }
+                else
+                {
+                    // Garage shifts bypass TorqueConverter::update(). Ensure a
+                    // prior D2 command cannot survive while target is P/N/R.
+                    this->tcc_percent = 0;
+                    if (this->tcc != nullptr) {
+                        this->tcc->reset_direct_slip_nonfault_state();
+                        if (this->target_gear == GearboxGear::Park) {
+                            this->tcc->clear_direct_slip_fault();
+                        }
+                    }
+                    this->pressure_mgr->set_target_tcc_pressure(0);
+                    egs_can_hal->set_clutch_status(TccClutchStatus::Open);
                 }
             }
             else { // Cannot read, or not in foward gear!
                 this->tcc_percent = 0;
+                if (this->tcc != nullptr) {
+                    this->tcc->reset_direct_slip_nonfault_state();
+                    if (this->actual_gear == GearboxGear::Park ||
+                        this->target_gear == GearboxGear::Park) {
+                        this->tcc->clear_direct_slip_fault();
+                    }
+                }
                 this->pressure_mgr->set_target_tcc_pressure(0);
                 egs_can_hal->set_clutch_status(TccClutchStatus::Open);
                 // sol_tcc->write_pwm_12_bit(0);
@@ -1238,14 +1263,20 @@ void Gearbox::controller_loop()
                 xTaskCreatePinnedToCore(Gearbox::start_shift_thread, "Shift handler", 8192, this, 10, &this->shift_task, 1);
             }
         }
-        else if (!shifting)
+        else
         {
-            sol_mpc->set_current_target(0);
-            sol_spc->set_current_target(0);
-            sol_tcc->set_duty(0);
-            this->pressure_mgr->set_shift_circuit(ShiftCircuit::sc_1_2, false);
-            this->pressure_mgr->set_shift_circuit(ShiftCircuit::sc_2_3, false);
-            this->pressure_mgr->set_shift_circuit(ShiftCircuit::sc_3_4, false);
+            if (this->tcc != nullptr) {
+                this->tcc->reset_direct_slip_nonfault_state();
+            }
+            this->pressure_mgr->set_target_tcc_pressure(0);
+            if (!shifting) {
+                sol_mpc->set_current_target(0);
+                sol_spc->set_current_target(0);
+                sol_tcc->set_duty(0);
+                this->pressure_mgr->set_shift_circuit(ShiftCircuit::sc_1_2, false);
+                this->pressure_mgr->set_shift_circuit(ShiftCircuit::sc_2_3, false);
+                this->pressure_mgr->set_shift_circuit(ShiftCircuit::sc_3_4, false);
+            }
         }
 
         int16_t tmp_atf = TCUIO::atf_temperature();

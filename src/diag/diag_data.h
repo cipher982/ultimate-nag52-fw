@@ -35,6 +35,7 @@
 #define RLI_CURR_SW_PART_INFO   0x2A // Current FW size and address
 #define RLI_NEXT_SW_PART_INFO   0x2B // Current FW size and address
 #define RLI_EMBED_FILE_INFO     0x2C // location and len of EMBED.ZIP
+#define RLI_TCC_DIRECT_SLIP     0x2D // V4 direct slip-feedback controller
 
 #define RLI_CLUTCH_SPEEDS   0x30
 #define RLI_SHIFTING_ALGO   0x31
@@ -156,6 +157,27 @@ typedef struct {
     int16_t load_percent;
 } __attribute__ ((packed)) DATA_TCC_PROGRAM;
 
+// Schema 4 is identified by flags bits 7..4 == 0x4. This reuses RLI 0x2D
+// without making V3 captures ambiguous to host tooling.
+typedef struct {
+    uint8_t state;
+    uint8_t reason;
+    uint8_t flags;
+    uint16_t pedal_position;
+    int16_t signed_slip_rpm;
+    int16_t slip_error_rpm;
+    uint16_t target_slip_rpm;
+    uint16_t nontracking_ms;
+    uint16_t controller_pressure_mbar;
+    uint16_t commanded_pressure_mbar;
+    int16_t pressure_delta_mbar;
+    int16_t tracking_band_rpm;
+    int16_t timeout_ms;
+} __attribute__ ((packed)) DATA_TCC_DIRECT_SLIP;
+
+static_assert(sizeof(DATA_TCC_DIRECT_SLIP) == 23,
+    "DATA_TCC_DIRECT_SLIP wire size changed");
+
 typedef struct {
     uint32_t address;
     uint32_t size;
@@ -193,6 +215,7 @@ DATA_CANBUS_RX get_rx_can_data(EgsBaseCan* can_layer);
 DATA_SYS_USAGE get_sys_usage(void);
 SHIFT_LIVE_INFO get_shift_live_Data(const EgsBaseCan* can_layer, Gearbox* g);
 DATA_TCC_PROGRAM get_tcc_program_data(Gearbox* gb_ptr);
+DATA_TCC_DIRECT_SLIP get_tcc_direct_slip_data(Gearbox* gb_ptr);
 
 // Read and write TCU Module settings
 
