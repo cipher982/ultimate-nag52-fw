@@ -311,7 +311,12 @@ StandardProfile::StandardProfile(bool is_diesel) : AbstractProfile(
 }
 
 GearboxDisplayGear StandardProfile::get_display_gear(GearboxGear target, GearboxGear actual) {
-    switch (target) {
+    GearboxGear displayed = target;
+    if (target >= GearboxGear::First && target <= GearboxGear::Fifth &&
+        actual >= GearboxGear::First && actual <= GearboxGear::Fifth) {
+        displayed = actual;
+    }
+    switch (displayed) {
         case GearboxGear::Park:
             return GearboxDisplayGear::P;
         case GearboxGear::Reverse_First:
@@ -326,7 +331,7 @@ GearboxDisplayGear StandardProfile::get_display_gear(GearboxGear target, Gearbox
         case GearboxGear::Fifth:
             if (ETS_CURRENT_SETTINGS.auto_show_gears_always) {
                 // Safety - GearboxGear for 1-5 = DisplayGear -4
-                return (GearboxDisplayGear)(((uint8_t)target) + 4); 
+                return (GearboxDisplayGear)(((uint8_t)displayed) + 4);
             } else {
                 return GearboxDisplayGear::D;
             }
@@ -338,7 +343,11 @@ GearboxDisplayGear StandardProfile::get_display_gear(GearboxGear target, Gearbox
 }
 
 bool StandardProfile::should_upshift(GearboxGear current_gear, SensorData* sensors) {
-    if (current_gear == GearboxGear::Fifth) { return false; }
+    if (current_gear == GearboxGear::Fifth) {
+        this->upshift_candidate_gear = GearboxGear::SignalNotAvailable;
+        this->upshift_candidate_last_checked_ms = 0;
+        return false;
+    }
     if (this->upshift_table != nullptr) { // TEST TABLE
         // RPM where we will upshift based on the current load
         uint16_t upshift_map_val = this->upshift_table->get_value(sensors->pedal_pos/2.5, (float)current_gear);
@@ -359,8 +368,25 @@ bool StandardProfile::should_upshift(GearboxGear current_gear, SensorData* senso
             can_upshift = false;
         }
         if (sensors->brake_pressed) { can_upshift = false; }
-        return can_upshift;
+        if (!can_upshift) {
+            this->upshift_candidate_gear = GearboxGear::SignalNotAvailable;
+            this->upshift_candidate_last_checked_ms = 0;
+            return false;
+        }
+
+        const uint32_t now_ms = GET_CLOCK_TIME();
+        if (this->upshift_candidate_gear != current_gear ||
+            now_ms - this->upshift_candidate_last_checked_ms > kUpshiftMaximumPollGapMs) {
+            this->upshift_candidate_gear = current_gear;
+            this->upshift_candidate_started_ms = now_ms;
+            this->upshift_candidate_last_checked_ms = now_ms;
+            return false;
+        }
+        this->upshift_candidate_last_checked_ms = now_ms;
+        return now_ms - this->upshift_candidate_started_ms >= kUpshiftConfirmationMs;
     } else {
+        this->upshift_candidate_gear = GearboxGear::SignalNotAvailable;
+        this->upshift_candidate_last_checked_ms = 0;
         return false;
     }
 }

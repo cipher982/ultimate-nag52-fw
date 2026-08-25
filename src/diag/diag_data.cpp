@@ -116,7 +116,7 @@ DATA_TCC_DIRECT_SLIP get_tcc_direct_slip_data(Gearbox* gb_ptr) {
     const TccDirectSlipOutput snapshot = gb_ptr->tcc->get_direct_slip_snapshot();
     ret.state = static_cast<uint8_t>(snapshot.state);
     ret.reason = static_cast<uint8_t>(snapshot.reason);
-    ret.flags = 0x40;
+    ret.flags = 0x50;
     if (snapshot.fault_latched) {
         ret.flags |= 0x01;
     }

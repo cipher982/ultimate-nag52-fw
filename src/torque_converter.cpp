@@ -21,6 +21,8 @@ const int16_t SLIP_V_WHEN_LOCKED = 10; // 10RPM for locking (Means we can monito
 const int16_t SLIP_V_OVERLOCKED = SLIP_V_WHEN_LOCKED/2;
 const int16_t SLIP_V_UNDERLOCKED = SLIP_V_WHEN_LOCKED*2;
 const uint8_t SLIP_SAMPLES_AVG = 25; // 500ms
+const uint16_t DIRECT_TCC_RELEASE_INPUT_RPM = 1000;
+const uint16_t DIRECT_TCC_REAPPLY_INPUT_RPM = 1100;
 
 const uint16_t SLIP_X_COAST[5] = {1000, 1500, 3500, 4000, 6000};
 const uint16_t SLIP_Z_COAST[5] = {  70,   40,   40,   10,   10};
@@ -227,36 +229,73 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
         this->absorbed_power_joule = 0;
     }
 
-    // V6 is intentionally isolated to D2. It crosses the truck's measured
-    // hydraulic dead zone quickly, then regulates signed slip directly. The
-    // reference controller remains unchanged in D1/D3-D5.
-    const bool direct_d2_selected =
-        curr_gear == GearboxGear::Second && TCC_CURRENT_SETTINGS.enable_d2;
+    // V7 uses one controller in every enabled stable forward gear from D2-D5.
+    // Torque direction is deliberately absent from the selection logic: once
+    // applied, the clutch keeps its holding pressure through drive/coast
+    // transitions instead of opening and waiting for the next throttle input.
+    const bool direct_selected =
+        (curr_gear == GearboxGear::Second && TCC_CURRENT_SETTINGS.enable_d2) ||
+        (curr_gear == GearboxGear::Third && TCC_CURRENT_SETTINGS.enable_d3) ||
+        (curr_gear == GearboxGear::Fourth && TCC_CURRENT_SETTINGS.enable_d4) ||
+        (curr_gear == GearboxGear::Fifth && TCC_CURRENT_SETTINGS.enable_d5);
+    if (direct_selected) {
+        if (this->direct_low_speed_inhibit) {
+            if (sensors->input_rpm >= DIRECT_TCC_REAPPLY_INPUT_RPM) {
+                this->direct_low_speed_inhibit = false;
+            }
+        } else if (sensors->input_rpm <= DIRECT_TCC_RELEASE_INPUT_RPM) {
+            this->direct_low_speed_inhibit = true;
+        }
+    } else {
+        this->direct_low_speed_inhibit = true;
+    }
     TccDirectSlipReason direct_inhibit = TccDirectSlipReason::None;
     if (is_shifting) {
         direct_inhibit = TccDirectSlipReason::ShiftActive;
     } else if (curr_gear != targ_gear) {
         direct_inhibit = TccDirectSlipReason::GearMismatch;
-    } else if (sensors->input_torque <= 0) {
-        direct_inhibit = TccDirectSlipReason::NonPositiveTorque;
+    } else if (sensors->atf_temp <= -10) {
+        direct_inhibit = TccDirectSlipReason::Temperature;
+    } else if (this->direct_low_speed_inhibit) {
+        direct_inhibit = TccDirectSlipReason::LowInputSpeed;
+    } else if (TCC_CURRENT_SETTINGS.react_on_engine_open_request &&
+        engine_req_state == TccReqState::Open) {
+        direct_inhibit = TccDirectSlipReason::EngineRequest;
     }
-    const bool direct_request = direct_d2_selected &&
-        this->target_tcc_state != InternalTccState::Open &&
+    const bool direct_request = direct_selected &&
         direct_inhibit == TccDirectSlipReason::None;
     const bool direct_speed_valid = engine_speed_fresh &&
         sensors->engine_rpm > 400 && sensors->engine_rpm != UINT16_MAX &&
         sensors->input_rpm > 0 && sensors->input_rpm != UINT16_MAX;
+    // A slip request relaxes the feedback band but never bleeds below the V7
+    // holding-pressure floor. The experiment intentionally does not recreate
+    // an open-converter tip-in merely to manufacture requested slip.
+    const bool engine_requests_slip =
+        TCC_CURRENT_SETTINGS.react_on_engine_slip_request &&
+        engine_req_state == TccReqState::Slipping;
+    const int direct_target_slip_rpm = engine_requests_slip ? 50 : 0;
+    const int direct_feedforward_pressure_mbar = direct_selected
+        ? this->tcc_lock_map->get_value(load_as_percent, (uint8_t)curr_gear)
+        : 0;
+
+    if (direct_selected) {
+        this->target_tcc_state = direct_request
+            ? (engine_requests_slip ? InternalTccState::Slipping : InternalTccState::Closed)
+            : InternalTccState::Open;
+        this->slip_target = direct_request ? direct_target_slip_rpm : SLIP_V_WHEN_OPEN;
+    }
     this->direct_slip_snapshot = this->direct_slip_controller.step({
-        direct_d2_selected,
+        direct_selected,
         direct_request,
         direct_speed_valid,
         direct_inhibit,
         signed_slip_now,
-        this->slip_target,
+        direct_target_slip_rpm,
+        direct_feedforward_pressure_mbar,
         static_cast<uint32_t>(esp_timer_get_time() / 1000ULL),
     });
 
-    if (direct_d2_selected) {
+    if (direct_selected) {
         this->prefill_done = false;
         this->prefill_running = false;
         this->tcc_commanded_pressure = this->direct_slip_snapshot.pressure_mbar;
@@ -267,7 +306,7 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
                 ? InternalTccState::Slipping : InternalTccState::Open;
             if (this->direct_slip_snapshot.state == TccDirectSlipState::Open ||
                 this->direct_slip_snapshot.state == TccDirectSlipState::ShiftInhibit ||
-                this->direct_slip_snapshot.state == TccDirectSlipState::FaultOpen) {
+                this->direct_slip_snapshot.state == TccDirectSlipState::RetryCooldown) {
                 this->target_tcc_state = InternalTccState::Open;
             }
         }

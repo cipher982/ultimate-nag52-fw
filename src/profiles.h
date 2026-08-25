@@ -159,9 +159,14 @@ public:
     bool should_downshift(GearboxGear current_gear, SensorData* sensors) override;
     void update(SensorData *sd) override;
 private:
+    static constexpr uint32_t kUpshiftConfirmationMs = 200;
+    static constexpr uint32_t kUpshiftMaximumPollGapMs = 100;
     int32_t accel_delta_factor = 0;
     SensorData last_sensors = {};
     uint32_t last_check = 0;
+    uint32_t upshift_candidate_started_ms = 0;
+    uint32_t upshift_candidate_last_checked_ms = 0;
+    GearboxGear upshift_candidate_gear = GearboxGear::SignalNotAvailable;
 };
 
 class ManualProfile : public AbstractProfile {

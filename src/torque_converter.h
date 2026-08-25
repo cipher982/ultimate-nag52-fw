@@ -132,6 +132,7 @@ class TorqueConverter {
         uint8_t prefill_cycles = 0;
         TccDirectSlipController direct_slip_controller;
         TccDirectSlipOutput direct_slip_snapshot = {};
+        bool direct_low_speed_inhibit = true;
 };
 
 #endif
