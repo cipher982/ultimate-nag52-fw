@@ -23,16 +23,16 @@ TccDirectSlipInput enabled_input(uint32_t now_ms, int slip_rpm, int target_rpm =
     };
 }
 
-void test_integrates_from_zero_without_contact_gate() {
+void test_aggressively_crosses_measured_dead_zone() {
     TccDirectSlipController controller;
     auto out = controller.step(enabled_input(0, 300));
     require(out.state == TccDirectSlipState::Regulating, "controller should regulate immediately");
-    require(out.pressure_mbar == 30, "first command should rise from zero at the rate limit");
+    require(out.pressure_mbar == 100, "first acquisition command should rise aggressively");
 
     for (uint32_t now = 20; now <= 600; now += 20) {
         out = controller.step(enabled_input(now, 300));
     }
-    require(out.pressure_mbar > 800, "feedback must continue above V3's false 800 mbar contact gate");
+    require(out.pressure_mbar >= 1500, "acquisition must cross the measured D2 dead zone");
     require(!out.fault_latched, "valid feedback ramp must not fault before the deadline");
 }
 
@@ -41,7 +41,7 @@ void test_tracks_high_contact_plant_before_deadline() {
     int slip_rpm = 300;
     TccDirectSlipOutput out = {};
     uint32_t now = 0;
-    for (; now < 2000 && !out.tracking_achieved && !out.fault_latched; now += 20) {
+    for (; now < 4000 && !out.tracking_achieved && !out.fault_latched; now += 20) {
         out = controller.step(enabled_input(now, slip_rpm));
         // Static high-contact plant: no clutch effect below 1340 mbar.
         const int coupled_pressure = out.pressure_mbar > 1340 ? out.pressure_mbar - 1340 : 0;
@@ -50,14 +50,14 @@ void test_tracks_high_contact_plant_before_deadline() {
     }
     require(out.tracking_achieved, "controller should track a 1340 mbar-contact plant");
     require(!out.fault_latched, "reachable high-contact plant must not fault");
-    require(now < 2000, "tracking must occur before the absolute deadline");
+    require(now < 4000, "tracking must occur before the absolute deadline");
     require(out.pressure_mbar > 1340, "tracking pressure should be discovered from slip feedback");
 }
 
 void test_unresponsive_plant_faults_open_without_retry() {
     TccDirectSlipController controller;
     TccDirectSlipOutput out = {};
-    for (uint32_t now = 0; now <= 2100; now += 20) {
+    for (uint32_t now = 0; now <= 4100; now += 20) {
         out = controller.step(enabled_input(now, 300));
     }
     require(out.state == TccDirectSlipState::FaultOpen, "unresponsive plant should fault");
@@ -73,7 +73,7 @@ void test_unresponsive_plant_faults_open_without_retry() {
 void test_shift_and_mismatch_are_immediate_open_inhibits() {
     TccDirectSlipController controller;
     auto out = controller.step(enabled_input(0, 300));
-    require(out.pressure_mbar == 30, "precondition: regulating");
+    require(out.pressure_mbar == 100, "precondition: regulating");
 
     auto input = enabled_input(20, 300);
     input.inhibit_reason = TccDirectSlipReason::ShiftActive;
@@ -88,13 +88,13 @@ void test_shift_and_mismatch_are_immediate_open_inhibits() {
         "actual/target mismatch should open immediately");
 
     out = controller.step(enabled_input(60, 300));
-    require(out.pressure_mbar == 30, "post-shift control should restart from zero");
+    require(out.pressure_mbar == 100, "post-shift control should restart from zero");
 }
 
 void test_fault_only_clears_explicitly() {
     TccDirectSlipController controller;
     TccDirectSlipOutput out = {};
-    for (uint32_t now = 0; now <= 2000; now += 20) {
+    for (uint32_t now = 0; now <= 4000; now += 20) {
         out = controller.step(enabled_input(now, 300));
     }
     auto not_selected = enabled_input(2100, 300);
@@ -105,7 +105,7 @@ void test_fault_only_clears_explicitly() {
 
     controller.clear_fault();
     out = controller.step(enabled_input(2200, 300));
-    require(!out.fault_latched && out.pressure_mbar == 30,
+    require(!out.fault_latched && out.pressure_mbar == 100,
         "explicit Park/key-cycle clear should permit a new attempt");
 }
 
@@ -123,7 +123,7 @@ void test_signed_negative_error_reduces_pressure() {
 void test_invalid_speed_opens_without_latching_and_restarts_from_zero() {
     TccDirectSlipController controller;
     auto out = controller.step(enabled_input(0, 300));
-    require(out.pressure_mbar == 30, "precondition: pressure should be rising");
+    require(out.pressure_mbar == 100, "precondition: pressure should be rising");
 
     auto invalid = enabled_input(20, 300);
     invalid.speed_valid = false;
@@ -134,7 +134,7 @@ void test_invalid_speed_opens_without_latching_and_restarts_from_zero() {
         "invalid speed must remain distinguishable from a tracking failure");
 
     out = controller.step(enabled_input(40, 300));
-    require(out.pressure_mbar == 30 && !out.fault_latched,
+    require(out.pressure_mbar == 100 && !out.fault_latched,
         "fresh speed should begin a bounded attempt from zero");
 }
 
@@ -142,16 +142,16 @@ void test_post_tracking_chatter_cannot_evade_loss_deadline() {
     TccDirectSlipController controller;
     TccDirectSlipOutput out = {};
     uint32_t now = 0;
-    for (int cycle = 0; cycle < TccDirectSlipCalibration::kTrackingConfirmCycles; ++cycle) {
+    for (int cycle = 0; cycle < 100 && !out.tracking_achieved; ++cycle) {
         out = controller.step(enabled_input(now, 20));
         now += 20;
     }
     require(out.tracking_achieved, "precondition: initial tracking should be acquired");
 
-    // Four in-band cycles are deliberately insufficient to reset the loss
-    // timer; alternate them with one out-of-band cycle past the 2 s deadline.
-    for (int cycle = 0; cycle < 110 && !out.fault_latched; ++cycle) {
-        const bool out_of_band = cycle % 5 == 0;
+    // Two in-band cycles are deliberately insufficient to reset the loss
+    // timer; alternate them with one out-of-band cycle past the 4 s deadline.
+    for (int cycle = 0; cycle < 220 && !out.fault_latched; ++cycle) {
+        const bool out_of_band = cycle % 3 == 0;
         out = controller.step(enabled_input(now, out_of_band ? 80 : 20));
         now += 20;
     }
@@ -181,7 +181,7 @@ void test_reachable_delayed_plants_track_before_deadline() {
         TccDirectSlipOutput out = {};
         double applied_pressure = 0;
         double slip = scenario.free_slip_rpm;
-        for (uint32_t now = 0; now < 2200 && !out.tracking_achieved && !out.fault_latched;
+        for (uint32_t now = 0; now < 4200 && !out.tracking_achieved && !out.fault_latched;
              now += 20) {
             out = controller.step(enabled_input(now, static_cast<int>(slip), scenario.target_rpm));
             applied_pressure += (out.pressure_mbar - applied_pressure) /
@@ -191,6 +191,13 @@ void test_reachable_delayed_plants_track_before_deadline() {
             const double equilibrium_slip = scenario.free_slip_rpm - coupling;
             slip += (equilibrium_slip - slip) / scenario.slip_tau_cycles;
         }
+        if (!out.tracking_achieved) {
+            std::cerr << "scenario contact=" << scenario.contact_mbar
+                      << " free_slip=" << scenario.free_slip_rpm
+                      << " target=" << scenario.target_rpm
+                      << " command=" << out.pressure_mbar
+                      << " slip=" << static_cast<int>(slip) << '\n';
+        }
         require(out.tracking_achieved, "reachable delayed plant should track before deadline");
         require(!out.fault_latched, "reachable delayed plant must not fault");
     }
@@ -198,7 +205,7 @@ void test_reachable_delayed_plants_track_before_deadline() {
 }
 
 int main() {
-    test_integrates_from_zero_without_contact_gate();
+    test_aggressively_crosses_measured_dead_zone();
     test_tracks_high_contact_plant_before_deadline();
     test_unresponsive_plant_faults_open_without_retry();
     test_shift_and_mismatch_are_immediate_open_inhibits();

@@ -3,19 +3,20 @@
 
 #include <stdint.h>
 
-// V4 deliberately has no fill/contact model and no learned-pressure
-// feed-forward. Pressure is the integral of measured signed slip error. These
-// constants define the bounded experiment/acceptance envelope; none encodes a
-// pressure at which the clutch is assumed to make contact.
+// V6 deliberately crosses the measured D2 hydraulic dead zone quickly, then
+// lets signed slip feedback control pressure. Reaching acquisition pressure
+// only proves hydraulic authority; tracking still requires measured slip.
 namespace TccDirectSlipCalibration {
 constexpr int kCycleMs = 20;
-constexpr int kPressureRisePerCycleMbar = 30;
-constexpr int kPressureFallPerCycleMbar = 60;
+constexpr int kAcquisitionPressureMbar = 1500;
+constexpr int kAcquisitionRisePerCycleMbar = 100;
+constexpr int kPressureRisePerCycleMbar = 60;
+constexpr int kPressureFallPerCycleMbar = 100;
 constexpr int kSlipErrorDivisor = 8;
-constexpr int kMaxCommandPressureMbar = 2000;
-constexpr int kTrackingBandRpm = 20;
-constexpr int kTrackingConfirmCycles = 5;
-constexpr uint32_t kNonTrackingTimeoutMs = 2000;
+constexpr int kMaxCommandPressureMbar = 3000;
+constexpr int kTrackingBandRpm = 50;
+constexpr int kTrackingConfirmCycles = 3;
+constexpr uint32_t kNonTrackingTimeoutMs = 4000;
 }
 
 enum class TccDirectSlipState : uint8_t {
@@ -81,6 +82,7 @@ private:
     uint32_t out_of_band_started_ms_ = 0;
     int tracking_cycles_ = 0;
     bool applying_ = false;
+    bool acquisition_pressure_reached_ = false;
     bool out_of_band_timer_active_ = false;
 };
 

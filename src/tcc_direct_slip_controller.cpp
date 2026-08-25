@@ -18,6 +18,7 @@ void TccDirectSlipController::open(TccDirectSlipReason reason, TccDirectSlipStat
     output_.nontracking_ms = 0;
     output_.tracking_achieved = false;
     applying_ = false;
+    acquisition_pressure_reached_ = false;
     out_of_band_timer_active_ = false;
     tracking_cycles_ = 0;
 }
@@ -85,22 +86,33 @@ TccDirectSlipOutput TccDirectSlipController::step(const TccDirectSlipInput& inpu
         output_.tracking_achieved = false;
     }
 
-    int pressure_delta = output_.slip_error_rpm /
-        TccDirectSlipCalibration::kSlipErrorDivisor;
-    pressure_delta = clamp_int(
-        pressure_delta,
-        -TccDirectSlipCalibration::kPressureFallPerCycleMbar,
-        TccDirectSlipCalibration::kPressureRisePerCycleMbar
-    );
     const int previous_pressure = output_.pressure_mbar;
+    int pressure_delta;
+    if (!acquisition_pressure_reached_ &&
+        previous_pressure < TccDirectSlipCalibration::kAcquisitionPressureMbar &&
+        output_.slip_error_rpm >= -TccDirectSlipCalibration::kTrackingBandRpm) {
+        pressure_delta = TccDirectSlipCalibration::kAcquisitionRisePerCycleMbar;
+    } else {
+        pressure_delta = output_.slip_error_rpm /
+            TccDirectSlipCalibration::kSlipErrorDivisor;
+        pressure_delta = clamp_int(
+            pressure_delta,
+            -TccDirectSlipCalibration::kPressureFallPerCycleMbar,
+            TccDirectSlipCalibration::kPressureRisePerCycleMbar
+        );
+    }
     output_.pressure_mbar = clamp_int(
         previous_pressure + pressure_delta,
         0,
         TccDirectSlipCalibration::kMaxCommandPressureMbar
     );
     output_.pressure_delta_mbar = output_.pressure_mbar - previous_pressure;
+    if (output_.pressure_mbar >= TccDirectSlipCalibration::kAcquisitionPressureMbar) {
+        acquisition_pressure_reached_ = true;
+    }
 
     const bool in_tracking_band =
+        acquisition_pressure_reached_ &&
         abs_int(output_.slip_error_rpm) <= TccDirectSlipCalibration::kTrackingBandRpm;
     if (in_tracking_band) {
         tracking_cycles_ += 1;

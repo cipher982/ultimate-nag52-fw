@@ -227,9 +227,9 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
         this->absorbed_power_joule = 0;
     }
 
-    // V4 is intentionally isolated to D2. It does not infer contact or consult
-    // a learned pressure map: signed slip error directly integrates pressure
-    // from zero. The reference controller remains unchanged in D1/D3-D5.
+    // V6 is intentionally isolated to D2. It crosses the truck's measured
+    // hydraulic dead zone quickly, then regulates signed slip directly. The
+    // reference controller remains unchanged in D1/D3-D5.
     const bool direct_d2_selected =
         curr_gear == GearboxGear::Second && TCC_CURRENT_SETTINGS.enable_d2;
     TccDirectSlipReason direct_inhibit = TccDirectSlipReason::None;
