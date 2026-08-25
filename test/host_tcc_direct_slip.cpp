@@ -70,6 +70,18 @@ void test_drive_and_coast_use_the_same_oriented_error() {
         require(drive_out.pressure_mbar == coast_out.pressure_mbar,
             "equivalent signed-slip cases must produce equal pressure");
     }
+
+    for (uint32_t now = 1220; now <= 1600; now += 20) {
+        const int slip_magnitude_rpm = now < 1440 ? 0 : 300;
+        const auto drive_out = drive.step(enabled_input(
+            now, slip_magnitude_rpm, 1, 40, 1500, true));
+        const auto coast_out = coast.step(enabled_input(
+            now, -slip_magnitude_rpm, -1, 40, 1500, true));
+        require(drive_out.oriented_slip_rpm == coast_out.oriented_slip_rpm,
+            "drive and coast shifts must orient equivalent slip alike");
+        require(drive_out.pressure_mbar == coast_out.pressure_mbar,
+            "drive and coast shifts must make equal pressure corrections");
+    }
 }
 
 void test_delayed_drive_and_coast_plants_track() {
@@ -122,7 +134,7 @@ void test_negative_error_relaxes_pressure() {
         "pressure relief must respect its per-cycle slew limit");
 }
 
-void test_shift_relaxes_to_partial_pressure_and_raises_reference() {
+void test_shift_tracks_wider_slip_target_without_venting() {
     TccDirectSlipController controller;
     TccDirectSlipOutput out = {};
     for (uint32_t now = 0; now <= 1200; now += 20) {
@@ -133,33 +145,38 @@ void test_shift_relaxes_to_partial_pressure_and_raises_reference() {
     require(pressure_before_shift > 1500,
         "precondition: PI must have raised pressure above the holding range");
 
-    int previous_pressure_mbar = pressure_before_shift;
     for (uint32_t now = 1220; now <= 1520; now += 20) {
-        out = controller.step(enabled_input(now, 500, 1, 40, 1500, true));
+        out = controller.step(enabled_input(now, 0, 1, 40, 1500, true));
         require(out.state == TccDirectSlipState::ShiftHold,
             "an active shift must report shift-hold state");
         require(out.pressure_mbar > 0,
             "an active shift must never vent the TCC circuit");
-        require(out.pressure_mbar <= previous_pressure_mbar,
-            "an active shift must not increase TCC pressure");
-        require(out.pressure_delta_mbar >=
-                -TccDirectSlipCalibration::kShiftRelaxPerCycleMbar &&
-                out.pressure_delta_mbar <= 0,
-            "shift pressure relief must be gradual and downward only");
-        require(out.pressure_mbar >= 1500,
-            "shift pressure must stop at the partial-coupling target");
+        require(out.pressure_delta_mbar ==
+                -TccDirectSlipCalibration::kShiftRelaxPerCycleMbar,
+            "too little shift slip must steadily relax TCC pressure");
         require(out.shift_hold, "shift hold must be explicit in telemetry");
-        previous_pressure_mbar = out.pressure_mbar;
     }
     require(out.pressure_mbar < pressure_before_shift,
         "a high pre-shift command must relax instead of remaining fully clamped");
     require(out.target_slip_rpm > target_before_shift,
         "the shift must relax the slip trajectory instead of opening the clutch");
-    require(out.target_slip_rpm <= TccDirectSlipCalibration::kShiftTargetRpm,
-        "the relaxed shift target must remain bounded");
+    require(out.target_slip_rpm == TccDirectSlipCalibration::kShiftTargetRpm,
+        "the shift trajectory must converge on its explicit slip target");
+
+    const int pressure_at_target_mbar = out.pressure_mbar;
+    out = controller.step(enabled_input(1540, 150, 1, 40, 1500, true));
+    require(out.pressure_mbar == pressure_at_target_mbar,
+        "shift pressure must hold when measured slip is on target");
+    require(out.pressure_delta_mbar == 0,
+        "on-target shift slip must not produce a pressure step");
+
+    out = controller.step(enabled_input(1560, 300, 1, 40, 1500, true));
+    require(out.pressure_delta_mbar ==
+            TccDirectSlipCalibration::kShiftTightenPerCycleMbar,
+        "excessive shift slip must increase coupling gradually");
 
     const int partial_shift_pressure_mbar = out.pressure_mbar;
-    out = controller.step(enabled_input(1540, 500));
+    out = controller.step(enabled_input(1580, 500));
     require(out.pressure_mbar >= partial_shift_pressure_mbar,
         "post-shift control must continue from partial pressure");
     require(out.pressure_delta_mbar <= 25,
@@ -168,7 +185,7 @@ void test_shift_relaxes_to_partial_pressure_and_raises_reference() {
         "post-shift trajectory must immediately begin returning to normal");
 }
 
-void test_shift_never_raises_a_low_pre_shift_pressure() {
+void test_shift_can_contain_excess_slip_from_low_pressure() {
     TccDirectSlipController controller;
     TccDirectSlipOutput out = {};
     for (uint32_t now = 0; now <= 1600; now += 20) {
@@ -178,11 +195,57 @@ void test_shift_never_raises_a_low_pre_shift_pressure() {
         "precondition: negative error must relax below feed-forward");
     const int pressure_before_shift = out.pressure_mbar;
 
-    out = controller.step(enabled_input(1620, 500, 1, 40, 2000, true));
-    require(out.pressure_mbar == pressure_before_shift,
-        "shift handling must not clamp a lightly applied TCC harder");
-    require(out.pressure_delta_mbar == 0,
-        "a low pre-shift command must carry into the shift unchanged");
+    for (uint32_t now = 1620; now <= 2800; now += 20) {
+        out = controller.step(enabled_input(now, 500, 1, 40, 2000, true));
+        require(out.pressure_mbar > pressure_before_shift,
+            "excessive shift slip must be contained from a light pre-shift apply");
+        require(out.pressure_delta_mbar == 0 || out.pressure_delta_mbar ==
+                TccDirectSlipCalibration::kShiftTightenPerCycleMbar,
+            "shift coupling must increase only through its slow slew limit");
+        require(out.pressure_mbar <= 2000,
+            "a light pre-shift apply must use holding pressure as its ceiling");
+    }
+    require(out.pressure_mbar == 2000,
+        "persistent excess slip must reach but not exceed the shift ceiling");
+}
+
+void test_shift_relaxation_stops_at_filled_circuit_floor() {
+    TccDirectSlipController controller;
+    TccDirectSlipOutput out = {};
+    for (uint32_t now = 0; now <= 1200; now += 20) {
+        out = controller.step(enabled_input(now, 400));
+    }
+
+    for (uint32_t now = 1220; now <= 2400; now += 20) {
+        out = controller.step(enabled_input(now, 0, 1, 40, 1500, true));
+        require(out.pressure_mbar >=
+                TccDirectSlipCalibration::kShiftMinimumPressureMbar,
+            "shift relaxation must preserve hydraulic circuit fill");
+    }
+    require(out.pressure_mbar ==
+            TccDirectSlipCalibration::kShiftMinimumPressureMbar,
+        "persistent low slip must settle at the filled-circuit floor");
+    require(out.pressure_mbar > 0,
+        "shift control must never reproduce the zero-pressure vent");
+}
+
+void test_controller_selected_mid_shift_fills_and_converges_target() {
+    TccDirectSlipController controller;
+    auto out = controller.step(enabled_input(0, 1000, 1, 40, 1500, true));
+    require(out.pressure_mbar ==
+            TccDirectSlipCalibration::kShiftTightenPerCycleMbar,
+        "a controller first selected mid-shift must begin filling gradually");
+    require(out.target_slip_rpm <
+            TccDirectSlipCalibration::kInitialTargetMaximumRpm,
+        "a high initial slip target must begin converging toward the shift target");
+
+    for (uint32_t now = 20; now <= 500; now += 20) {
+        out = controller.step(enabled_input(now, 1000, 1, 40, 1500, true));
+        require(out.pressure_mbar > 0,
+            "mid-shift activation must not leave the converter circuit vented");
+    }
+    require(out.target_slip_rpm == TccDirectSlipCalibration::kShiftTargetRpm,
+        "mid-shift activation must converge to the same shift slip target");
 }
 
 void test_torque_reversal_holds_before_changing_pressure() {
@@ -296,8 +359,10 @@ int main() {
     test_drive_and_coast_use_the_same_oriented_error();
     test_delayed_drive_and_coast_plants_track();
     test_negative_error_relaxes_pressure();
-    test_shift_relaxes_to_partial_pressure_and_raises_reference();
-    test_shift_never_raises_a_low_pre_shift_pressure();
+    test_shift_tracks_wider_slip_target_without_venting();
+    test_shift_can_contain_excess_slip_from_low_pressure();
+    test_shift_relaxation_stops_at_filled_circuit_floor();
+    test_controller_selected_mid_shift_fills_and_converges_target();
     test_torque_reversal_holds_before_changing_pressure();
     test_unresponsive_plant_faults_once_without_retry();
     test_cold_pressure_derate_cannot_trigger_full_pressure_fault();

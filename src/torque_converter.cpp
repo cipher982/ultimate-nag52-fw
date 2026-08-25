@@ -230,8 +230,8 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
     }
 
     // V8 uses one signed-slip controller in every enabled forward gear D2-D5.
-    // A shift freezes feedback and relaxes toward partial coupling instead of
-    // emptying the converter circuit and applying it again afterward.
+    // During a shift it regulates a wider slip target without emptying the
+    // converter circuit and applying it again afterward.
     const bool direct_selected =
         (curr_gear == GearboxGear::Second && TCC_CURRENT_SETTINGS.enable_d2) ||
         (curr_gear == GearboxGear::Third && TCC_CURRENT_SETTINGS.enable_d3) ||
