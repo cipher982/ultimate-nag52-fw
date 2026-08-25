@@ -3,9 +3,10 @@
 
 #include <stdint.h>
 
-// V8 follows one signed slip target in D2-D5. Pressure is held while a gear
-// shift is active; otherwise a bounded PI correction may add or remove
-// pressure around the feed-forward command.
+// V8 follows one signed slip target in D2-D5. During a gear shift it keeps the
+// clutch partly applied by relaxing pressure toward the feed-forward holding
+// pressure without venting the circuit. Otherwise a bounded PI correction may
+// add or remove pressure around the feed-forward command.
 namespace TccDirectSlipCalibration {
 constexpr int kCycleMs = 20;
 constexpr int kMinimumControlPressureMbar = 1000;
@@ -15,6 +16,7 @@ constexpr int kMaxCommandPressureMbar = 3000;
 constexpr int kApplyRisePerCycleMbar = 100;
 constexpr int kRegulateRisePerCycleMbar = 25;
 constexpr int kRegulateFallPerCycleMbar = 50;
+constexpr int kShiftRelaxPerCycleMbar = 50;
 constexpr int kProportionalMbarPerRpm = 2;
 constexpr int kProportionalMinimumMbar = -1000;
 constexpr int kProportionalMaximumMbar = 1500;

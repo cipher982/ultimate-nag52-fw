@@ -189,6 +189,21 @@ TccDirectSlipOutput TccDirectSlipController::step(const TccDirectSlipInput& inpu
     output_.shift_hold = input.shift_active;
 
     if (input.shift_active) {
+        const int previous_pressure_mbar = output_.pressure_mbar;
+        // Keep the converter partly coupled while the gear elements exchange.
+        // A high pre-shift PI command may relax toward the known holding range,
+        // but a low command is never raised and the circuit is never vented.
+        const int shift_pressure_target_mbar =
+            previous_pressure_mbar < feedforward_pressure_mbar
+            ? previous_pressure_mbar : feedforward_pressure_mbar;
+        output_.pressure_mbar = move_toward(
+            previous_pressure_mbar,
+            shift_pressure_target_mbar,
+            0,
+            TccDirectSlipCalibration::kShiftRelaxPerCycleMbar
+        );
+        output_.pressure_delta_mbar =
+            output_.pressure_mbar - previous_pressure_mbar;
         output_.state = TccDirectSlipState::ShiftHold;
         output_.reason = TccDirectSlipReason::ShiftActive;
         output_.tracking_achieved = false;

@@ -122,38 +122,67 @@ void test_negative_error_relaxes_pressure() {
         "pressure relief must respect its per-cycle slew limit");
 }
 
-void test_shift_holds_pressure_and_raises_reference() {
+void test_shift_relaxes_to_partial_pressure_and_raises_reference() {
     TccDirectSlipController controller;
     TccDirectSlipOutput out = {};
-    for (uint32_t now = 0; now <= 1000; now += 20) {
-        out = controller.step(enabled_input(now, 40));
+    for (uint32_t now = 0; now <= 1200; now += 20) {
+        out = controller.step(enabled_input(now, 400));
     }
     const int pressure_before_shift = out.pressure_mbar;
     const int target_before_shift = out.target_slip_rpm;
-    require(pressure_before_shift > 0, "precondition: clutch must be applied");
+    require(pressure_before_shift > 1500,
+        "precondition: PI must have raised pressure above the holding range");
 
-    for (uint32_t now = 1020; now <= 1320; now += 20) {
+    int previous_pressure_mbar = pressure_before_shift;
+    for (uint32_t now = 1220; now <= 1520; now += 20) {
         out = controller.step(enabled_input(now, 500, 1, 40, 1500, true));
         require(out.state == TccDirectSlipState::ShiftHold,
             "an active shift must report shift-hold state");
-        require(out.pressure_mbar == pressure_before_shift,
-            "an active shift must not dump or increase TCC pressure");
-        require(out.pressure_delta_mbar == 0,
-            "held shift pressure must have zero command step");
+        require(out.pressure_mbar > 0,
+            "an active shift must never vent the TCC circuit");
+        require(out.pressure_mbar <= previous_pressure_mbar,
+            "an active shift must not increase TCC pressure");
+        require(out.pressure_delta_mbar >=
+                -TccDirectSlipCalibration::kShiftRelaxPerCycleMbar &&
+                out.pressure_delta_mbar <= 0,
+            "shift pressure relief must be gradual and downward only");
+        require(out.pressure_mbar >= 1500,
+            "shift pressure must stop at the partial-coupling target");
         require(out.shift_hold, "shift hold must be explicit in telemetry");
+        previous_pressure_mbar = out.pressure_mbar;
     }
+    require(out.pressure_mbar < pressure_before_shift,
+        "a high pre-shift command must relax instead of remaining fully clamped");
     require(out.target_slip_rpm > target_before_shift,
         "the shift must relax the slip trajectory instead of opening the clutch");
     require(out.target_slip_rpm <= TccDirectSlipCalibration::kShiftTargetRpm,
         "the relaxed shift target must remain bounded");
 
-    out = controller.step(enabled_input(1340, 500));
-    require(out.pressure_mbar >= pressure_before_shift,
-        "post-shift control must continue from the held pressure");
+    const int partial_shift_pressure_mbar = out.pressure_mbar;
+    out = controller.step(enabled_input(1540, 500));
+    require(out.pressure_mbar >= partial_shift_pressure_mbar,
+        "post-shift control must continue from partial pressure");
     require(out.pressure_delta_mbar <= 25,
         "post-shift pressure must resume without a step change");
     require(out.target_slip_rpm < TccDirectSlipCalibration::kShiftTargetRpm,
         "post-shift trajectory must immediately begin returning to normal");
+}
+
+void test_shift_never_raises_a_low_pre_shift_pressure() {
+    TccDirectSlipController controller;
+    TccDirectSlipOutput out = {};
+    for (uint32_t now = 0; now <= 1600; now += 20) {
+        out = controller.step(enabled_input(now, 0));
+    }
+    require(out.pressure_mbar < 1500,
+        "precondition: negative error must relax below feed-forward");
+    const int pressure_before_shift = out.pressure_mbar;
+
+    out = controller.step(enabled_input(1620, 500, 1, 40, 2000, true));
+    require(out.pressure_mbar == pressure_before_shift,
+        "shift handling must not clamp a lightly applied TCC harder");
+    require(out.pressure_delta_mbar == 0,
+        "a low pre-shift command must carry into the shift unchanged");
 }
 
 void test_torque_reversal_holds_before_changing_pressure() {
@@ -267,7 +296,8 @@ int main() {
     test_drive_and_coast_use_the_same_oriented_error();
     test_delayed_drive_and_coast_plants_track();
     test_negative_error_relaxes_pressure();
-    test_shift_holds_pressure_and_raises_reference();
+    test_shift_relaxes_to_partial_pressure_and_raises_reference();
+    test_shift_never_raises_a_low_pre_shift_pressure();
     test_torque_reversal_holds_before_changing_pressure();
     test_unresponsive_plant_faults_once_without_retry();
     test_cold_pressure_derate_cannot_trigger_full_pressure_fault();
