@@ -229,10 +229,9 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
         this->absorbed_power_joule = 0;
     }
 
-    // V7 uses one controller in every enabled stable forward gear from D2-D5.
-    // Torque direction is deliberately absent from the selection logic: once
-    // applied, the clutch keeps its holding pressure through drive/coast
-    // transitions instead of opening and waiting for the next throttle input.
+    // V8 uses one signed-slip controller in every enabled forward gear D2-D5.
+    // A shift freezes feedback and holds the existing pressure instead of
+    // emptying the converter circuit and applying it again afterward.
     const bool direct_selected =
         (curr_gear == GearboxGear::Second && TCC_CURRENT_SETTINGS.enable_d2) ||
         (curr_gear == GearboxGear::Third && TCC_CURRENT_SETTINGS.enable_d3) ||
@@ -249,12 +248,9 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
     } else {
         this->direct_low_speed_inhibit = true;
     }
+    const bool direct_shift_active = is_shifting || curr_gear != targ_gear;
     TccDirectSlipReason direct_inhibit = TccDirectSlipReason::None;
-    if (is_shifting) {
-        direct_inhibit = TccDirectSlipReason::ShiftActive;
-    } else if (curr_gear != targ_gear) {
-        direct_inhibit = TccDirectSlipReason::GearMismatch;
-    } else if (sensors->atf_temp <= -10) {
+    if (sensors->atf_temp <= -10) {
         direct_inhibit = TccDirectSlipReason::Temperature;
     } else if (this->direct_low_speed_inhibit) {
         direct_inhibit = TccDirectSlipReason::LowInputSpeed;
@@ -267,29 +263,45 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
     const bool direct_speed_valid = engine_speed_fresh &&
         sensors->engine_rpm > 400 && sensors->engine_rpm != UINT16_MAX &&
         sensors->input_rpm > 0 && sensors->input_rpm != UINT16_MAX;
-    // A slip request relaxes the feedback band but never bleeds below the V7
-    // holding-pressure floor. The experiment intentionally does not recreate
-    // an open-converter tip-in merely to manufacture requested slip.
     const bool engine_requests_slip =
         TCC_CURRENT_SETTINGS.react_on_engine_slip_request &&
         engine_req_state == TccReqState::Slipping;
-    const int direct_target_slip_rpm = engine_requests_slip ? 50 : 0;
-    const int direct_feedforward_pressure_mbar = direct_selected
-        ? this->tcc_lock_map->get_value(load_as_percent, (uint8_t)curr_gear)
-        : 0;
+    const int direct_target_slip_rpm = engine_requests_slip
+        ? 50
+        : MAX(
+            TccDirectSlipCalibration::kRequestedTargetMinimumRpm,
+            MIN(TccDirectSlipCalibration::kRequestedTargetMaximumRpm,
+                slipping_rpm_targ)
+        );
+    int direct_torque_direction = 0;
+    if (sensors->input_torque > 20) {
+        direct_torque_direction = 1;
+    } else if (sensors->input_torque < -20) {
+        direct_torque_direction = -1;
+    }
+    // The learned map is positive-torque data. Coast starts from the measured
+    // same-truck holding floor and PI corrects it; it does not reuse a drive
+    // cell with an absolute-value torque lookup.
+    const int direct_feedforward_pressure_mbar = !direct_selected
+        ? 0
+        : (direct_torque_direction < 0
+            ? TccDirectSlipCalibration::kMinimumFeedForwardPressureMbar
+            : this->tcc_lock_map->get_value(load_as_percent, (uint8_t)curr_gear));
 
     if (direct_selected) {
         this->target_tcc_state = direct_request
-            ? (engine_requests_slip ? InternalTccState::Slipping : InternalTccState::Closed)
-            : InternalTccState::Open;
+            ? InternalTccState::Slipping : InternalTccState::Open;
         this->slip_target = direct_request ? direct_target_slip_rpm : SLIP_V_WHEN_OPEN;
     }
     this->direct_slip_snapshot = this->direct_slip_controller.step({
         direct_selected,
         direct_request,
         direct_speed_valid,
+        direct_shift_active,
+        sensors->atf_temp >= TCC_CURRENT_SETTINGS.tcc_temp_multiplier.raw_max,
         direct_inhibit,
         signed_slip_now,
+        direct_torque_direction,
         direct_target_slip_rpm,
         direct_feedforward_pressure_mbar,
         static_cast<uint32_t>(esp_timer_get_time() / 1000ULL),
@@ -299,16 +311,11 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
         this->prefill_done = false;
         this->prefill_running = false;
         this->tcc_commanded_pressure = this->direct_slip_snapshot.pressure_mbar;
-        if (this->direct_slip_snapshot.state == TccDirectSlipState::Tracking) {
-            this->current_tcc_state = this->target_tcc_state;
-        } else {
-            this->current_tcc_state = this->direct_slip_snapshot.pressure_mbar > 0
-                ? InternalTccState::Slipping : InternalTccState::Open;
-            if (this->direct_slip_snapshot.state == TccDirectSlipState::Open ||
-                this->direct_slip_snapshot.state == TccDirectSlipState::ShiftInhibit ||
-                this->direct_slip_snapshot.state == TccDirectSlipState::RetryCooldown) {
-                this->target_tcc_state = InternalTccState::Open;
-            }
+        this->current_tcc_state = this->direct_slip_snapshot.pressure_mbar > 0
+            ? InternalTccState::Slipping : InternalTccState::Open;
+        if (this->direct_slip_snapshot.state == TccDirectSlipState::Open ||
+            this->direct_slip_snapshot.state == TccDirectSlipState::FaultOpen) {
+            this->target_tcc_state = InternalTccState::Open;
         }
         if (!is_shifting && was_shifting) {
             was_shifting = false;
@@ -322,6 +329,11 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
             this->tcc_commanded_pressure =
                 (float)this->tcc_commanded_pressure * mul;
         }
+        this->tcc_commanded_pressure = MAX(
+            0,
+            MIN(TccDirectSlipCalibration::kMaxCommandPressureMbar,
+                this->tcc_commanded_pressure)
+        );
         pm->set_target_tcc_pressure(this->tcc_commanded_pressure);
         return;
     }

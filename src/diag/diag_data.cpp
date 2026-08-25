@@ -116,24 +116,41 @@ DATA_TCC_DIRECT_SLIP get_tcc_direct_slip_data(Gearbox* gb_ptr) {
     const TccDirectSlipOutput snapshot = gb_ptr->tcc->get_direct_slip_snapshot();
     ret.state = static_cast<uint8_t>(snapshot.state);
     ret.reason = static_cast<uint8_t>(snapshot.reason);
-    ret.flags = 0x50;
+    ret.flags = 0x60;
     if (snapshot.fault_latched) {
         ret.flags |= 0x01;
     }
     if (snapshot.tracking_achieved) {
         ret.flags |= 0x02;
     }
+    if (snapshot.shift_hold) {
+        ret.flags |= 0x04;
+    }
+    if (snapshot.torque_direction != 0) {
+        ret.flags |= 0x08;
+    }
     ret.pedal_position = gb_ptr->sensor_data.pedal_pos;
     ret.signed_slip_rpm = static_cast<int16_t>(snapshot.signed_slip_rpm);
     ret.slip_error_rpm = static_cast<int16_t>(snapshot.slip_error_rpm);
     ret.target_slip_rpm = static_cast<uint16_t>(snapshot.target_slip_rpm);
-    ret.nontracking_ms = static_cast<uint16_t>(snapshot.nontracking_ms);
+    ret.nontracking_ms = static_cast<uint16_t>(
+        snapshot.nontracking_ms > UINT16_MAX ? UINT16_MAX : snapshot.nontracking_ms);
     ret.controller_pressure_mbar = static_cast<uint16_t>(snapshot.pressure_mbar);
     ret.commanded_pressure_mbar = gb_ptr->tcc->get_target_pressure();
     ret.pressure_delta_mbar =
         static_cast<int16_t>(snapshot.pressure_delta_mbar);
     ret.tracking_band_rpm = TccDirectSlipCalibration::kTrackingBandRpm;
     ret.timeout_ms = TccDirectSlipCalibration::kNonTrackingTimeoutMs;
+    ret.feedforward_pressure_mbar =
+        static_cast<uint16_t>(snapshot.feedforward_pressure_mbar);
+    ret.proportional_pressure_mbar =
+        static_cast<int16_t>(snapshot.proportional_pressure_mbar);
+    ret.integral_pressure_mbar =
+        static_cast<int16_t>(snapshot.integral_pressure_mbar);
+    ret.oriented_slip_rpm = static_cast<int16_t>(snapshot.oriented_slip_rpm);
+    ret.torque_direction = static_cast<int8_t>(snapshot.torque_direction);
+    ret.tcc_current_ma = sol_tcc->get_current();
+    ret.tcc_pwm = sol_tcc->get_pwm_compensated();
     return ret;
 }
 

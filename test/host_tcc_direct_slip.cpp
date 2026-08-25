@@ -13,213 +13,267 @@ void require(bool condition, const char* message) {
 
 TccDirectSlipInput enabled_input(
     uint32_t now_ms,
-    int slip_rpm,
-    int target_rpm = 0,
-    int feedforward_mbar = 1500
+    int signed_slip_rpm,
+    int torque_direction = 1,
+    int target_rpm = 40,
+    int feedforward_mbar = 1500,
+    bool shift_active = false
 ) {
     return {
         true,
         true,
         true,
+        shift_active,
+        true,
         TccDirectSlipReason::None,
-        slip_rpm,
+        signed_slip_rpm,
+        torque_direction,
         target_rpm,
         feedforward_mbar,
         now_ms,
     };
 }
 
-void test_reaches_and_retains_holding_floor_at_zero_slip() {
-    TccDirectSlipController controller;
-    TccDirectSlipOutput out = {};
-    for (uint32_t now = 0; now <= 400; now += 20) {
-        out = controller.step(enabled_input(now, 0));
-    }
-    require(out.state == TccDirectSlipState::Tracking, "zero slip should confirm tracking");
-    require(out.pressure_mbar == 1500, "tracking must retain the holding-pressure floor");
-    require(!out.fault_latched, "normal tracking must never latch a fault");
-}
-
-void test_positive_and_negative_slip_have_identical_control() {
-    TccDirectSlipController positive;
-    TccDirectSlipController negative;
-    for (uint32_t now = 0; now <= 1200; now += 20) {
-        const auto pos = positive.step(enabled_input(now, 120));
-        const auto neg = negative.step(enabled_input(now, -120));
-        require(pos.pressure_mbar == neg.pressure_mbar,
-            "equal slip magnitudes must produce equal pressure");
-        require(pos.pressure_delta_mbar == neg.pressure_delta_mbar,
-            "torque direction must not change controller polarity");
-        require(pos.state == neg.state, "torque direction must not change controller state");
-    }
-}
-
-void test_torque_reversal_never_releases_a_tracking_clutch() {
-    TccDirectSlipController controller;
-    TccDirectSlipOutput out = {};
-    uint32_t now = 0;
-    for (; now <= 400; now += 20) {
-        out = controller.step(enabled_input(now, 0));
-    }
-    require(out.tracking_achieved, "precondition: clutch should be tracking");
-
-    const int pressure_before = out.pressure_mbar;
-    out = controller.step(enabled_input(now, -90));
-    require(out.pressure_mbar >= pressure_before,
-        "coast torque must not release holding pressure");
-    now += 20;
-    out = controller.step(enabled_input(now, 90));
-    require(out.pressure_mbar >= pressure_before,
-        "return to drive torque must not reacquire from zero");
-}
-
-void test_v6_coast_fault_window_applies_instead_of_latching_open() {
-    TccDirectSlipController controller;
-    TccDirectSlipOutput out = {};
-    for (uint32_t now = 0; now <= 4200; now += 20) {
-        out = controller.step(enabled_input(now, -85));
-        require(out.state != TccDirectSlipState::RetryCooldown,
-            "the captured negative-slip coast window is not a qualified failure");
-        require(!out.fault_latched, "coast must never create a drive-long fault");
-    }
-    require(out.pressure_mbar >= TccDirectSlipCalibration::kMinimumHoldPressureMbar,
-        "negative-slip coast must actively apply the clutch");
-}
-
-void test_feedback_waits_for_hydraulic_response() {
+void test_fast_fill_then_bounded_feedback() {
     TccDirectSlipController controller;
     TccDirectSlipOutput out = {};
     for (uint32_t now = 0; now <= 280; now += 20) {
         out = controller.step(enabled_input(now, 300));
     }
-    require(out.pressure_mbar == 1500, "controller should stop at the feed-forward floor");
+    require(out.pressure_mbar == 1500,
+        "V8 should cross the measured dead zone in 300 ms");
+    require(out.state == TccDirectSlipState::Applying,
+        "fill and settle must precede tracking");
 
-    for (uint32_t now = 300; now < 380; now += 20) {
+    for (uint32_t now = 300; now < 480; now += 20) {
         out = controller.step(enabled_input(now, 300));
         require(out.pressure_mbar == 1500,
-            "feedback must wait for the measured hydraulic response interval");
+            "PI must wait for the hydraulic settle window");
     }
-    out = controller.step(enabled_input(380, 300));
-    require(out.pressure_mbar == 1550,
-        "feedback should add one bounded step after the response interval");
+    out = controller.step(enabled_input(480, 300));
+    require(out.pressure_delta_mbar == 25,
+        "PI pressure rise must use the V8 regulation slew limit");
+    require(out.proportional_pressure_mbar > 0,
+        "positive excess slip must request more pressure");
 }
 
-void test_delayed_plants_track_in_both_torque_directions() {
+void test_drive_and_coast_use_the_same_oriented_error() {
+    TccDirectSlipController drive;
+    TccDirectSlipController coast;
+    for (uint32_t now = 0; now <= 1200; now += 20) {
+        const auto drive_out = drive.step(enabled_input(now, 140, 1));
+        const auto coast_out = coast.step(enabled_input(now, -140, -1));
+        require(drive_out.oriented_slip_rpm == coast_out.oriented_slip_rpm,
+            "drive and coast must orient physically equivalent slip alike");
+        require(drive_out.slip_error_rpm == coast_out.slip_error_rpm,
+            "drive and coast must produce the same control error");
+        require(drive_out.pressure_mbar == coast_out.pressure_mbar,
+            "equivalent signed-slip cases must produce equal pressure");
+    }
+}
+
+void test_delayed_drive_and_coast_plants_track() {
     for (const int direction : {1, -1}) {
         TccDirectSlipController controller;
         TccDirectSlipOutput out = {};
-        double applied_pressure = 0;
-        double slip_magnitude = 300;
+        double hydraulic_pressure_mbar = 0;
+        double slip_magnitude_rpm = 300;
         uint32_t now = 0;
-        for (; now < 4000 && !out.tracking_achieved; now += 20) {
+        for (; now < 5000 && !out.tracking_achieved; now += 20) {
             out = controller.step(enabled_input(
                 now,
-                direction * static_cast<int>(slip_magnitude),
-                0,
-                1500
+                direction * static_cast<int>(slip_magnitude_rpm),
+                direction
             ));
-            applied_pressure += (out.pressure_mbar - applied_pressure) / 5.0;
-            const double coupling = applied_pressure > 1350
-                ? applied_pressure - 1350 : 0;
-            const double equilibrium_slip = 300 - coupling > 0
-                ? 300 - coupling : 0;
-            slip_magnitude += (equilibrium_slip - slip_magnitude) / 4.0;
+            hydraulic_pressure_mbar +=
+                (out.pressure_mbar - hydraulic_pressure_mbar) / 5.0;
+            const double coupling_rpm = hydraulic_pressure_mbar > 1350
+                ? hydraulic_pressure_mbar - 1350 : 0;
+            const double equilibrium_slip_rpm = 300 - coupling_rpm > 0
+                ? 300 - coupling_rpm : 0;
+            slip_magnitude_rpm +=
+                (equilibrium_slip_rpm - slip_magnitude_rpm) / 4.0;
         }
-        require(out.tracking_achieved, "reachable delayed plant should track");
-        require(now < 4000, "reachable delayed plant should track before timeout");
-        require(!out.fault_latched, "tracking must not latch a fault");
+        require(out.tracking_achieved,
+            "a reachable delayed plant must follow the V8 slip trajectory");
+        require(now < 5000,
+            "a reachable delayed plant must track before the fault window");
+        require(!out.fault_latched,
+            "normal delayed hydraulic response must not latch a fault");
     }
 }
 
-void test_shift_and_mismatch_open_then_reapply_immediately() {
-    TccDirectSlipController controller;
-    auto out = controller.step(enabled_input(0, 300));
-    require(out.pressure_mbar == 100, "precondition: application should begin immediately");
-
-    auto input = enabled_input(20, 300);
-    input.inhibit_reason = TccDirectSlipReason::ShiftActive;
-    out = controller.step(input);
-    require(out.state == TccDirectSlipState::ShiftInhibit && out.pressure_mbar == 0,
-        "shift activity should open immediately");
-
-    input = enabled_input(40, 300);
-    input.inhibit_reason = TccDirectSlipReason::GearMismatch;
-    out = controller.step(input);
-    require(out.state == TccDirectSlipState::ShiftInhibit && out.pressure_mbar == 0,
-        "actual/target mismatch should remain open");
-
-    out = controller.step(enabled_input(60, 300));
-    require(out.state == TccDirectSlipState::Applying && out.pressure_mbar == 100,
-        "stable post-shift gear should reapply without a torque gate");
-}
-
-void test_unresponsive_plant_cools_down_and_retries() {
+void test_negative_error_relaxes_pressure() {
     TccDirectSlipController controller;
     TccDirectSlipOutput out = {};
-    uint32_t cooldown_started_ms = 0;
-    int maximum_pressure_mbar = 0;
-    for (uint32_t now = 0; now < 8000; now += 20) {
-        out = controller.step(enabled_input(now, 300));
-        if (out.pressure_mbar > maximum_pressure_mbar) {
-            maximum_pressure_mbar = out.pressure_mbar;
-        }
+    for (uint32_t now = 0; now <= 1200; now += 20) {
+        out = controller.step(enabled_input(now, 400));
+    }
+    const int high_pressure_mbar = out.pressure_mbar;
+    require(high_pressure_mbar > 1500,
+        "precondition: excess slip should raise pressure above feed-forward");
+
+    out = controller.step(enabled_input(1220, 0));
+    require(out.proportional_pressure_mbar < 0,
+        "slip below the trajectory must produce negative proportional correction");
+    require(out.pressure_mbar < high_pressure_mbar,
+        "V8 must be able to remove pressure as well as add it");
+    require(out.pressure_delta_mbar >= -50,
+        "pressure relief must respect its per-cycle slew limit");
+}
+
+void test_shift_holds_pressure_and_raises_reference() {
+    TccDirectSlipController controller;
+    TccDirectSlipOutput out = {};
+    for (uint32_t now = 0; now <= 1000; now += 20) {
+        out = controller.step(enabled_input(now, 40));
+    }
+    const int pressure_before_shift = out.pressure_mbar;
+    const int target_before_shift = out.target_slip_rpm;
+    require(pressure_before_shift > 0, "precondition: clutch must be applied");
+
+    for (uint32_t now = 1020; now <= 1320; now += 20) {
+        out = controller.step(enabled_input(now, 500, 1, 40, 1500, true));
+        require(out.state == TccDirectSlipState::ShiftHold,
+            "an active shift must report shift-hold state");
+        require(out.pressure_mbar == pressure_before_shift,
+            "an active shift must not dump or increase TCC pressure");
+        require(out.pressure_delta_mbar == 0,
+            "held shift pressure must have zero command step");
+        require(out.shift_hold, "shift hold must be explicit in telemetry");
+    }
+    require(out.target_slip_rpm > target_before_shift,
+        "the shift must relax the slip trajectory instead of opening the clutch");
+    require(out.target_slip_rpm <= TccDirectSlipCalibration::kShiftTargetRpm,
+        "the relaxed shift target must remain bounded");
+
+    out = controller.step(enabled_input(1340, 500));
+    require(out.pressure_mbar >= pressure_before_shift,
+        "post-shift control must continue from the held pressure");
+    require(out.pressure_delta_mbar <= 25,
+        "post-shift pressure must resume without a step change");
+    require(out.target_slip_rpm < TccDirectSlipCalibration::kShiftTargetRpm,
+        "post-shift trajectory must immediately begin returning to normal");
+}
+
+void test_torque_reversal_holds_before_changing_pressure() {
+    TccDirectSlipController controller;
+    TccDirectSlipOutput out = {};
+    for (uint32_t now = 0; now <= 900; now += 20) {
+        out = controller.step(enabled_input(now, 120, 1));
+    }
+    const int pressure_before_reversal = out.pressure_mbar;
+
+    for (uint32_t now = 920; now < 1120; now += 20) {
+        out = controller.step(enabled_input(now, -120, -1));
+        require(out.pressure_mbar == pressure_before_reversal,
+            "torque reversal must hold pressure during its settle window");
+        require(out.torque_direction == -1,
+            "telemetry must expose the new coast direction");
+    }
+    out = controller.step(enabled_input(1120, -120, -1));
+    require(out.pressure_delta_mbar <= 25 && out.pressure_delta_mbar >= -50,
+        "control after torque reversal must resume through normal slew limits");
+}
+
+void test_unresponsive_plant_faults_once_without_retry() {
+    TccDirectSlipController controller;
+    TccDirectSlipOutput out = {};
+    uint32_t fault_time = 0;
+    for (uint32_t now = 0; now < 10000; now += 20) {
+        out = controller.step(enabled_input(now, 1000));
         require(out.pressure_mbar <= TccDirectSlipCalibration::kMaxCommandPressureMbar,
-            "feedback must never exceed the command-pressure cap");
-        if (out.state == TccDirectSlipState::RetryCooldown) {
-            cooldown_started_ms = now;
+            "controller pressure must remain bounded");
+        if (out.fault_latched) {
+            fault_time = now;
             break;
         }
     }
-    require(cooldown_started_ms > 0, "qualified nontracking should enter cooldown");
-    require(maximum_pressure_mbar == TccDirectSlipCalibration::kMaxCommandPressureMbar,
-        "an unresponsive plant should reach the bounded pressure cap before retry");
-    require(out.pressure_mbar == 0, "cooldown must release the clutch");
-    require(!out.fault_latched, "ordinary nontracking must not latch for the drive");
+    require(fault_time > 0, "an unresponsive plant must eventually fault");
+    require(out.state == TccDirectSlipState::FaultOpen,
+        "qualified nontracking must latch open");
+    require(out.pressure_mbar == 0, "fault-open must command zero pressure");
 
-    out = controller.step(enabled_input(cooldown_started_ms + 500, 300));
-    require(out.state == TccDirectSlipState::RetryCooldown && out.pressure_mbar == 0,
-        "controller should honor its bounded cooldown");
-    out = controller.step(enabled_input(cooldown_started_ms + 1020, 300));
-    require(out.state == TccDirectSlipState::Applying && out.pressure_mbar == 100,
-        "controller should retry automatically after cooldown");
+    out = controller.step(enabled_input(fault_time + 5000, 1000));
+    require(out.state == TccDirectSlipState::FaultOpen && out.pressure_mbar == 0,
+        "V8 must never retry a thermal fault automatically");
+    controller.clear_fault();
+    out = controller.step(enabled_input(fault_time + 5020, 300));
+    require(!out.fault_latched && out.pressure_mbar == 100,
+        "an explicit Park/key-cycle clear must permit a new fill");
 }
 
-void test_invalid_speed_opens_without_latching() {
+void test_cold_pressure_derate_cannot_trigger_full_pressure_fault() {
     TccDirectSlipController controller;
-    auto invalid = enabled_input(0, -100);
-    invalid.speed_valid = false;
-    const auto out = controller.step(invalid);
+    TccDirectSlipOutput out = {};
+    for (uint32_t now = 0; now < 10000; now += 20) {
+        auto input = enabled_input(now, 1000);
+        input.allow_fault_monitor = false;
+        out = controller.step(input);
+    }
+    require(!out.fault_latched,
+        "a derated cold command must not be diagnosed as a full-pressure failure");
+    require(out.pressure_mbar == TccDirectSlipCalibration::kMaxCommandPressureMbar,
+        "cold fault suppression must not change the bounded controller command");
+}
+
+void test_indeterminate_torque_freezes_feedback() {
+    TccDirectSlipController controller;
+    TccDirectSlipOutput out = {};
+    for (uint32_t now = 0; now <= 900; now += 20) {
+        out = controller.step(enabled_input(now, 200, 1));
+    }
+    const int pressure_before_deadband = out.pressure_mbar;
+    for (uint32_t now = 920; now <= 1100; now += 20) {
+        out = controller.step(enabled_input(now, -300, 0));
+        require(out.pressure_mbar == pressure_before_deadband,
+            "uncertain torque direction must freeze feedback pressure");
+    }
+}
+
+void test_invalid_speed_opens_without_fault() {
+    TccDirectSlipController controller;
+    auto input = enabled_input(0, 100);
+    input.speed_valid = false;
+    const auto out = controller.step(input);
     require(out.state == TccDirectSlipState::Open && out.pressure_mbar == 0,
         "invalid speed must fail open");
     require(out.reason == TccDirectSlipReason::InvalidSpeed && !out.fault_latched,
-        "invalid speed must remain a non-latching inhibit");
+        "invalid speed must remain distinct from a thermal fault");
 }
 
-void test_feedforward_is_clamped_to_validated_envelope() {
+void test_feedforward_and_target_are_clamped() {
     TccDirectSlipController low;
     TccDirectSlipController high;
     TccDirectSlipOutput low_out = {};
     TccDirectSlipOutput high_out = {};
     for (uint32_t now = 0; now <= 500; now += 20) {
-        low_out = low.step(enabled_input(now, 0, 0, 200));
-        high_out = high.step(enabled_input(now, 0, 0, 6000));
+        low_out = low.step(enabled_input(now, 20, 1, 0, 200));
+        high_out = high.step(enabled_input(now, 80, 1, 500, 6000));
     }
-    require(low_out.pressure_mbar == 1500, "feed-forward must not fall below hold pressure");
-    require(high_out.pressure_mbar == 2000, "feed-forward must stay below feedback headroom");
+    require(low_out.feedforward_pressure_mbar == 1500,
+        "feed-forward must not fall below the measured same-truck floor");
+    require(high_out.feedforward_pressure_mbar == 2000,
+        "feed-forward must preserve feedback headroom");
+    require(low_out.target_slip_rpm >= 20,
+        "normal target must not request a hard zero-slip lock");
+    require(high_out.target_slip_rpm <= 80,
+        "normal target must stay inside the V8 envelope");
 }
 }
 
 int main() {
-    test_reaches_and_retains_holding_floor_at_zero_slip();
-    test_positive_and_negative_slip_have_identical_control();
-    test_torque_reversal_never_releases_a_tracking_clutch();
-    test_v6_coast_fault_window_applies_instead_of_latching_open();
-    test_feedback_waits_for_hydraulic_response();
-    test_delayed_plants_track_in_both_torque_directions();
-    test_shift_and_mismatch_open_then_reapply_immediately();
-    test_unresponsive_plant_cools_down_and_retries();
-    test_invalid_speed_opens_without_latching();
-    test_feedforward_is_clamped_to_validated_envelope();
-    std::cout << "TCC V7 stable-lock host tests passed\n";
+    test_fast_fill_then_bounded_feedback();
+    test_drive_and_coast_use_the_same_oriented_error();
+    test_delayed_drive_and_coast_plants_track();
+    test_negative_error_relaxes_pressure();
+    test_shift_holds_pressure_and_raises_reference();
+    test_torque_reversal_holds_before_changing_pressure();
+    test_unresponsive_plant_faults_once_without_retry();
+    test_cold_pressure_derate_cannot_trigger_full_pressure_fault();
+    test_indeterminate_torque_freezes_feedback();
+    test_invalid_speed_opens_without_fault();
+    test_feedforward_and_target_are_clamped();
+    std::cout << "TCC V8 host tests passed\n";
     return 0;
 }

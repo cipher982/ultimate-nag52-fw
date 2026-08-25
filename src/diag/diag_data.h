@@ -157,8 +157,8 @@ typedef struct {
     int16_t load_percent;
 } __attribute__ ((packed)) DATA_TCC_PROGRAM;
 
-// Schema 4 is identified by flags bits 7..4 == 0x4. This reuses RLI 0x2D
-// without making V3 captures ambiguous to host tooling.
+// Versioned V8 controller telemetry on RLI 0x2D. Flags bits 7..4 identify the
+// schema so older captures remain unambiguous to host tooling.
 typedef struct {
     uint8_t state;
     uint8_t reason;
@@ -173,9 +173,16 @@ typedef struct {
     int16_t pressure_delta_mbar;
     int16_t tracking_band_rpm;
     int16_t timeout_ms;
+    uint16_t feedforward_pressure_mbar;
+    int16_t proportional_pressure_mbar;
+    int16_t integral_pressure_mbar;
+    int16_t oriented_slip_rpm;
+    int8_t torque_direction;
+    uint16_t tcc_current_ma;
+    uint16_t tcc_pwm;
 } __attribute__ ((packed)) DATA_TCC_DIRECT_SLIP;
 
-static_assert(sizeof(DATA_TCC_DIRECT_SLIP) == 23,
+static_assert(sizeof(DATA_TCC_DIRECT_SLIP) == 36,
     "DATA_TCC_DIRECT_SLIP wire size changed");
 
 typedef struct {
