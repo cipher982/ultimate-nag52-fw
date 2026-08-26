@@ -1,4 +1,5 @@
 #include "torque_converter.h"
+#include "tcc_pressure_command.h"
 #include "solenoids/solenoids.h"
 #include "tcu_maths.h"
 #include "tcu_maths_impl.h"
@@ -229,9 +230,9 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
         this->absorbed_power_joule = 0;
     }
 
-    // V8 uses one signed-slip controller in every enabled forward gear D2-D5.
-    // During a shift it regulates a wider slip target without emptying the
-    // converter circuit and applying it again afterward.
+    // V9 uses one upper-bound slip controller in every enabled forward gear
+    // D2-D5. Once coupled it retains the proven pressure; during a shift it
+    // freezes that command rather than reacting to ratio-change slip.
     const bool direct_selected =
         (curr_gear == GearboxGear::Second && TCC_CURRENT_SETTINGS.enable_d2) ||
         (curr_gear == GearboxGear::Third && TCC_CURRENT_SETTINGS.enable_d3) ||
@@ -326,8 +327,10 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear,
         if (sensors->atf_temp < TCC_CURRENT_SETTINGS.tcc_temp_multiplier.raw_max) {
             float mul = interpolate_float(sensors->atf_temp,
                 &TCC_CURRENT_SETTINGS.tcc_temp_multiplier, InterpType::Linear);
-            this->tcc_commanded_pressure =
-                (float)this->tcc_commanded_pressure * mul;
+            this->tcc_commanded_pressure = tcc_final_pressure_command_mbar(
+                this->tcc_commanded_pressure,
+                mul
+            );
         }
         this->tcc_commanded_pressure = MAX(
             0,

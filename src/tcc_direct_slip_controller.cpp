@@ -29,12 +29,10 @@ void TccDirectSlipController::reset_control_state() {
     integral_scaled_ = 0;
     active_direction_ = 0;
     tracking_cycles_ = 0;
-    shift_pressure_ceiling_mbar_ = 0;
     feedforward_reached_ms_ = 0;
     direction_changed_ms_ = 0;
     nontracking_started_ms_ = 0;
     trajectory_target_rpm_ = TccDirectSlipCalibration::kRequestedTargetMaximumRpm;
-    shift_active_ = false;
 }
 
 void TccDirectSlipController::open(TccDirectSlipReason reason) {
@@ -119,6 +117,17 @@ TccDirectSlipOutput TccDirectSlipController::step(const TccDirectSlipInput& inpu
         return output_;
     }
 
+    if (input.shift_active && (!active_ || !feedforward_reached_)) {
+        // A partial fill is not a proven holding pressure. If a shift begins
+        // before acquisition reaches feed-forward, stay open through that
+        // shift rather than parking in the measured V8 breakaway band. Normal
+        // bounded fill begins as soon as the shift/mismatch indication clears.
+        open(TccDirectSlipReason::ShiftActive);
+        output_.signed_slip_rpm = signed_slip_rpm;
+        output_.shift_hold = true;
+        return output_;
+    }
+
     if (!active_) {
         active_ = true;
         output_ = {};
@@ -190,50 +199,12 @@ TccDirectSlipOutput TccDirectSlipController::step(const TccDirectSlipInput& inpu
 
     if (input.shift_active) {
         const int previous_pressure_mbar = output_.pressure_mbar;
-        if (!shift_active_) {
-            shift_active_ = true;
-            // Bound shift correction by the larger of the pre-shift command
-            // and the normal holding pressure. A lightly applied clutch gets
-            // limited headroom to contain excessive slip without a pressure
-            // jump.
-            shift_pressure_ceiling_mbar_ = clamp_int(
-                previous_pressure_mbar > feedforward_pressure_mbar
-                    ? previous_pressure_mbar : feedforward_pressure_mbar,
-                TccDirectSlipCalibration::kShiftMinimumPressureMbar,
-                TccDirectSlipCalibration::kMaxCommandPressureMbar
-            );
-        }
-
-        int shift_pressure_target_mbar = previous_pressure_mbar;
-        const int lower_slip_limit_rpm = trajectory_target_rpm_ -
-            TccDirectSlipCalibration::kShiftSlipDeadbandRpm;
-        const int upper_slip_limit_rpm = trajectory_target_rpm_ +
-            TccDirectSlipCalibration::kShiftSlipDeadbandRpm;
-        if (previous_pressure_mbar <
-            TccDirectSlipCalibration::kShiftMinimumPressureMbar) {
-            // A controller first selected during a shift fills the circuit but
-            // does not jump straight to lock pressure.
-            shift_pressure_target_mbar =
-                TccDirectSlipCalibration::kShiftMinimumPressureMbar;
-        } else if (input_direction == 0 || direction_settling_ ||
-            oriented_slip_rpm < lower_slip_limit_rpm) {
-            // Too little slip means the clutch is carrying too much of the
-            // ratio change. Relax it while preserving circuit fill.
-            shift_pressure_target_mbar =
-                TccDirectSlipCalibration::kShiftMinimumPressureMbar;
-        } else if (oriented_slip_rpm > upper_slip_limit_rpm) {
-            // Excess slip is contained gently, never above the ceiling fixed
-            // when this shift began.
-            shift_pressure_target_mbar = shift_pressure_ceiling_mbar_;
-        }
-        output_.pressure_mbar = move_toward(
-            previous_pressure_mbar,
-            shift_pressure_target_mbar,
-            TccDirectSlipCalibration::kShiftTightenPerCycleMbar,
-            TccDirectSlipCalibration::kShiftRelaxPerCycleMbar
-        );
-        output_.pressure_delta_mbar =
-            output_.pressure_mbar - previous_pressure_mbar;
+        // Ratio-change inertia contaminates converter slip during a shift, so
+        // it is not a safe feedback signal. Freeze the command that was
+        // already carrying torque; do not unload and do not tighten here.
+        // Normal upper-bound feedback resumes after the shift clears.
+        output_.pressure_mbar = previous_pressure_mbar;
+        output_.pressure_delta_mbar = 0;
         output_.state = TccDirectSlipState::ShiftHold;
         output_.reason = TccDirectSlipReason::ShiftActive;
         output_.tracking_achieved = false;
@@ -243,9 +214,6 @@ TccDirectSlipOutput TccDirectSlipController::step(const TccDirectSlipInput& inpu
         return output_;
     }
 
-    shift_active_ = false;
-    shift_pressure_ceiling_mbar_ = 0;
-
     output_.reason = TccDirectSlipReason::None;
     const int previous_pressure_mbar = output_.pressure_mbar;
     if (!feedforward_reached_) {
@@ -253,9 +221,9 @@ TccDirectSlipOutput TccDirectSlipController::step(const TccDirectSlipInput& inpu
             previous_pressure_mbar,
             feedforward_pressure_mbar,
             TccDirectSlipCalibration::kApplyRisePerCycleMbar,
-            TccDirectSlipCalibration::kRegulateFallPerCycleMbar
+            0
         );
-        if (output_.pressure_mbar == feedforward_pressure_mbar) {
+        if (output_.pressure_mbar >= feedforward_pressure_mbar) {
             feedforward_reached_ = true;
             feedforward_reached_ms_ = input.now_ms;
         }
@@ -264,7 +232,7 @@ TccDirectSlipOutput TccDirectSlipController::step(const TccDirectSlipInput& inpu
             previous_pressure_mbar,
             feedforward_pressure_mbar,
             TccDirectSlipCalibration::kApplyRisePerCycleMbar,
-            TccDirectSlipCalibration::kRegulateFallPerCycleMbar
+            0
         );
         if (input.now_ms - feedforward_reached_ms_ >= TccDirectSlipCalibration::kFillSettleMs) {
             feedback_ready_ = true;
@@ -274,14 +242,16 @@ TccDirectSlipOutput TccDirectSlipController::step(const TccDirectSlipInput& inpu
     const bool feedback_allowed = feedback_ready_ && input_direction != 0 &&
         !direction_settling_;
     if (feedback_allowed) {
+        const int excess_slip_error_rpm = slip_error_rpm > 0
+            ? slip_error_rpm : 0;
         const int proportional_pressure_mbar = clamp_int(
-            TccDirectSlipCalibration::kProportionalMbarPerRpm * slip_error_rpm,
-            TccDirectSlipCalibration::kProportionalMinimumMbar,
+            TccDirectSlipCalibration::kProportionalMbarPerRpm * excess_slip_error_rpm,
+            0,
             TccDirectSlipCalibration::kProportionalMaximumMbar
         );
         int proposed_integral_scaled = clamp_int(
-            integral_scaled_ + slip_error_rpm,
-            TccDirectSlipCalibration::kIntegralMinimumMbar * TccDirectSlipCalibration::kIntegralScale,
+            integral_scaled_ + excess_slip_error_rpm,
+            0,
             TccDirectSlipCalibration::kIntegralMaximumMbar * TccDirectSlipCalibration::kIntegralScale
         );
         const int proposed_unclamped_pressure_mbar = feedforward_pressure_mbar +
@@ -290,26 +260,28 @@ TccDirectSlipOutput TccDirectSlipController::step(const TccDirectSlipInput& inpu
         const bool integrating_further_into_high_saturation =
             proposed_unclamped_pressure_mbar > TccDirectSlipCalibration::kMaxCommandPressureMbar &&
             slip_error_rpm > 0;
-        const bool integrating_further_into_low_saturation =
-            proposed_unclamped_pressure_mbar < TccDirectSlipCalibration::kMinimumControlPressureMbar &&
-            slip_error_rpm < 0;
-        if (!integrating_further_into_high_saturation &&
-            !integrating_further_into_low_saturation) {
+        if (!integrating_further_into_high_saturation) {
             integral_scaled_ = proposed_integral_scaled;
         }
 
         const int integral_pressure_mbar =
             integral_scaled_ / TccDirectSlipCalibration::kIntegralScale;
-        const int requested_pressure_mbar = clamp_int(
+        int requested_pressure_mbar = clamp_int(
             feedforward_pressure_mbar + proportional_pressure_mbar + integral_pressure_mbar,
             TccDirectSlipCalibration::kMinimumControlPressureMbar,
             TccDirectSlipCalibration::kMaxCommandPressureMbar
         );
+        // Command memory is the holding-pressure estimator. A coupled clutch
+        // may stay above feed-forward, but it is never driven downward solely
+        // because measured slip is below a nonzero target.
+        if (requested_pressure_mbar < previous_pressure_mbar) {
+            requested_pressure_mbar = previous_pressure_mbar;
+        }
         output_.pressure_mbar = move_toward(
             previous_pressure_mbar,
             requested_pressure_mbar,
             TccDirectSlipCalibration::kRegulateRisePerCycleMbar,
-            TccDirectSlipCalibration::kRegulateFallPerCycleMbar
+            0
         );
         output_.proportional_pressure_mbar = proportional_pressure_mbar;
         output_.integral_pressure_mbar = integral_pressure_mbar;
@@ -317,7 +289,8 @@ TccDirectSlipOutput TccDirectSlipController::step(const TccDirectSlipInput& inpu
     output_.pressure_delta_mbar = output_.pressure_mbar - previous_pressure_mbar;
 
     const bool in_tracking_band = feedback_ready_ && active_direction_ != 0 &&
-        abs_int(slip_error_rpm) <= TccDirectSlipCalibration::kTrackingBandRpm;
+        abs_int(signed_slip_rpm) <=
+            trajectory_target_rpm_ + TccDirectSlipCalibration::kTrackingBandRpm;
     if (in_tracking_band) {
         tracking_cycles_ += 1;
         if (tracking_cycles_ >= TccDirectSlipCalibration::kTrackingConfirmCycles) {

@@ -3,10 +3,10 @@
 
 #include <stdint.h>
 
-// V8 follows one signed slip target in D2-D5. During a gear shift it directly
-// regulates slip around a wider target while keeping the hydraulic circuit
-// filled. Otherwise a bounded PI correction may add or remove pressure around
-// the feed-forward command.
+// V9 treats requested slip as an upper containment bound in D2-D5. Once the
+// converter is coupled it preserves the proven pressure instead of reducing
+// pressure to manufacture slip. During a shift it freezes a proven holding
+// command because ratio-change slip is not a valid converter feedback signal.
 namespace TccDirectSlipCalibration {
 constexpr int kCycleMs = 20;
 constexpr int kMinimumControlPressureMbar = 1000;
@@ -14,16 +14,10 @@ constexpr int kMinimumFeedForwardPressureMbar = 1500;
 constexpr int kMaximumFeedForwardPressureMbar = 2000;
 constexpr int kMaxCommandPressureMbar = 3000;
 constexpr int kApplyRisePerCycleMbar = 100;
-constexpr int kRegulateRisePerCycleMbar = 25;
-constexpr int kRegulateFallPerCycleMbar = 50;
-constexpr int kShiftRelaxPerCycleMbar = 50;
-constexpr int kShiftTightenPerCycleMbar = 25;
-constexpr int kShiftMinimumPressureMbar = 1000;
+constexpr int kRegulateRisePerCycleMbar = 50;
 constexpr int kProportionalMbarPerRpm = 2;
-constexpr int kProportionalMinimumMbar = -1000;
 constexpr int kProportionalMaximumMbar = 1500;
 constexpr int kIntegralScale = 50; // 20 ms cycles per second
-constexpr int kIntegralMinimumMbar = -1000;
 constexpr int kIntegralMaximumMbar = 1000;
 constexpr int kRequestedTargetMinimumRpm = 20;
 constexpr int kRequestedTargetMaximumRpm = 80;
@@ -31,7 +25,6 @@ constexpr int kInitialTargetMaximumRpm = 300;
 constexpr int kTargetSlewRpmPerCycle = 4;
 constexpr int kShiftTargetRpm = 150;
 constexpr int kShiftTargetSlewRpmPerCycle = 8;
-constexpr int kShiftSlipDeadbandRpm = 25;
 constexpr uint32_t kFillSettleMs = 200;
 constexpr uint32_t kDirectionSettleMs = 200;
 constexpr int kTrackingBandRpm = 30;
@@ -114,14 +107,12 @@ private:
     uint32_t nontracking_started_ms_ = 0;
     int integral_scaled_ = 0;
     int trajectory_target_rpm_ = TccDirectSlipCalibration::kRequestedTargetMaximumRpm;
-    int shift_pressure_ceiling_mbar_ = 0;
     int active_direction_ = 0;
     int tracking_cycles_ = 0;
     bool active_ = false;
     bool feedforward_reached_ = false;
     bool feedback_ready_ = false;
     bool direction_settling_ = false;
-    bool shift_active_ = false;
     bool nontracking_timer_active_ = false;
     bool fault_latched_ = false;
 };
