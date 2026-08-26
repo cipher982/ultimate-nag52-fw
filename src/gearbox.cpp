@@ -48,6 +48,7 @@ Gearbox::Gearbox(Shifter* shifter) : shifter(shifter), kickdown(), brake_pedal()
     this->current_profile = nullptr;
     egs_can_hal->set_drive_profile(GearboxProfile::Underscore); // Uninitialized
     this->profile_mutex = portMUX_INITIALIZER_UNLOCKED;
+    this->shift_diag_mutex = portMUX_INITIALIZER_UNLOCKED;
     this->speed_sensors = SpeedSensors {
         .n2 = 0,
         .n3 = 0,
@@ -321,6 +322,100 @@ ClutchSpeeds Gearbox::diag_get_clutch_speeds()
     );
 }
 
+ShiftDiagnosticSnapshot Gearbox::diag_get_shift_diagnostic()
+{
+    ShiftDiagnosticSnapshot ret;
+    portENTER_CRITICAL(&this->shift_diag_mutex);
+    ret = this->shift_diag_snapshot;
+    portEXIT_CRITICAL(&this->shift_diag_mutex);
+    return ret;
+}
+
+void Gearbox::publish_shift_diagnostic(uint8_t shift_algorithm, GearChange change,
+    bool stationary, uint32_t shift_elapsed_ms)
+{
+    ShiftDiagnosticSnapshot ret = {};
+    const TccDirectSlipOutput tcc_snapshot = this->tcc == nullptr
+        ? TccDirectSlipOutput{}
+        : this->tcc->get_direct_slip_snapshot();
+
+    ret.schema_version = 1;
+    if (this->shifting) {
+        ret.flags |= 0x01;
+    }
+    if (this->flaring) {
+        ret.flags |= 0x02;
+    }
+    if (stationary) {
+        ret.flags |= 0x04;
+    }
+    if (tcc_snapshot.fault_latched) {
+        ret.flags |= 0x08;
+    }
+    if (tcc_snapshot.tracking_achieved) {
+        ret.flags |= 0x10;
+    }
+    if (tcc_snapshot.shift_hold) {
+        ret.flags |= 0x20;
+    }
+    if (tcc_snapshot.torque_direction != 0) {
+        ret.flags |= 0x40;
+    }
+
+    ret.gear_change = static_cast<uint8_t>(change);
+    ret.shift_algorithm = shift_algorithm;
+    ret.shift_phase = this->algo_feedback.shift_phase;
+    ret.subphase_shift = this->algo_feedback.subphase_shift;
+    ret.subphase_mod = this->algo_feedback.subphase_mod;
+    ret.targ_act_gear = this->get_targ_curr_gear();
+    ret.torque_req_ctrl_type = static_cast<uint8_t>(this->output_data.ctrl_type);
+    ret.torque_req_bounds = static_cast<uint8_t>(this->output_data.bounds);
+    ret.tcc_state = static_cast<uint8_t>(tcc_snapshot.state);
+    ret.tcc_reason = static_cast<uint8_t>(tcc_snapshot.reason);
+    ret.pedal_position = this->sensor_data.pedal_pos;
+    ret.atf_temp_c = this->sensor_data.atf_temp;
+    ret.capture_time_ms = GET_CLOCK_TIME();
+    ret.shift_elapsed_ms = static_cast<uint16_t>(MIN(shift_elapsed_ms, UINT16_MAX));
+    ret.n2_rpm = this->speed_sensors.n2;
+    ret.n3_rpm = this->speed_sensors.n3;
+    ret.input_rpm = this->sensor_data.input_rpm;
+    ret.engine_rpm = this->sensor_data.engine_rpm;
+    ret.output_rpm = this->sensor_data.output_rpm;
+    ret.on_clutch_speed_rpm = this->algo_feedback.s_on;
+    ret.off_clutch_speed_rpm = this->algo_feedback.s_off;
+    ret.sync_rpm = static_cast<int16_t>(this->algo_feedback.sync_rpm);
+    ret.target_turbine_rpm = this->algo_feedback.s_targ;
+    ret.on_clutch_pressure_mbar = this->algo_feedback.p_on;
+    ret.off_clutch_pressure_mbar = this->algo_feedback.p_off;
+    if (this->pressure_mgr != nullptr) {
+        ret.spc_pressure_mbar = this->pressure_mgr->get_corrected_spc_pressure();
+        ret.mpc_pressure_mbar = this->pressure_mgr->get_corrected_modulating_pressure();
+    }
+    ret.tcc_controller_pressure_mbar = static_cast<uint16_t>(tcc_snapshot.pressure_mbar);
+    ret.tcc_commanded_pressure_mbar = this->tcc == nullptr ? 0 : this->tcc->get_target_pressure();
+    ret.torque_request_nm = this->output_data.ctrl_type == TorqueRequestControlType::None
+        ? INT16_MAX
+        : static_cast<int16_t>(this->output_data.torque_req_amount);
+    ret.engine_torque_nm = this->sensor_data.converted_torque;
+    ret.input_torque_nm = this->sensor_data.input_torque;
+    ret.tcc_signed_slip_rpm = static_cast<int16_t>(tcc_snapshot.signed_slip_rpm);
+
+    portENTER_CRITICAL(&this->shift_diag_mutex);
+    ret.sample_counter = ++this->shift_diag_counter;
+    this->shift_diag_snapshot = ret;
+    portEXIT_CRITICAL(&this->shift_diag_mutex);
+}
+
+void Gearbox::publish_idle_shift_diagnostic()
+{
+    this->publish_shift_diagnostic(
+        static_cast<uint8_t>(ShiftStyle::Crossover_Up),
+        GearChange::_IDLE,
+        false,
+        0
+    );
+}
+
 ShiftReportSegment Gearbox::collect_report_segment(uint64_t start_time) {
     return ShiftReportSegment{
         .static_torque = sensor_data.converted_torque,
@@ -431,12 +526,15 @@ bool Gearbox::elapse_shift(GearChange req_lookup, AbstractProfile* profile, bool
 
         float threshold_torque = VEHICLE_CONFIG.engine_drag_torque/10.0;
         ShiftingAlgorithm* algo;
+        ShiftStyle shift_style;
         if (is_upshift) {
             if (sensor_data.converted_driver_torque <= -threshold_torque/2) {
                 algo = new ReleasingShift(&sid);
+                shift_style = ShiftStyle::Release_Up;
             }
             else {
                 algo = new CrossoverShift(&sid);
+                shift_style = ShiftStyle::Crossover_Up;
             }
         }
         else {
@@ -451,8 +549,10 @@ bool Gearbox::elapse_shift(GearChange req_lookup, AbstractProfile* profile, bool
             }
             if (is_release) {
                 algo = new ReleasingShift(&sid);
+                shift_style = ShiftStyle::Release_Dn;
             } else {
                 algo = new CrossoverShift(&sid);
+                shift_style = ShiftStyle::Crossover_Dn;
             }
         }
 
@@ -506,6 +606,12 @@ bool Gearbox::elapse_shift(GearChange req_lookup, AbstractProfile* profile, bool
             pressure_mgr->update_pressures(
                 sid.targ_g,
                 sid.change
+            );
+            this->publish_shift_diagnostic(
+                static_cast<uint8_t>(shift_style),
+                req_lookup,
+                stationary_shift,
+                total_elapsed
             );
 
             if (step_result == 0) {
@@ -805,6 +911,7 @@ cleanup:
     this->shifting = false;
     this->fwd_gear_shift = false;
     this->is_upshift = false;
+    this->publish_idle_shift_diagnostic();
     vTaskDelete(nullptr);
 }
 
@@ -1454,6 +1561,9 @@ void Gearbox::controller_loop()
         }
         portEXIT_CRITICAL(&this->profile_mutex);
         pressure_mgr->update_pressures(this->actual_gear, GearChange::_IDLE);
+        if (!this->shifting) {
+            this->publish_idle_shift_diagnostic();
+        }
         uint32_t time = GET_CLOCK_TIME() - start;
         if (time < 20) {
             vTaskDelay((20 - time) / portTICK_PERIOD_MS); // 50 updates/sec!

@@ -33,6 +33,7 @@ public:
     explicit Gearbox(Shifter* shifter);
     // Diag test
     ClutchSpeeds diag_get_clutch_speeds();
+    ShiftDiagnosticSnapshot diag_get_shift_diagnostic();
     void set_profile(AbstractProfile* prof);
     esp_err_t start_controller(void);
     void inc_gear_request(void);
@@ -70,9 +71,15 @@ private:
     void set_torque_request(TorqueRequestControlType ctrl_type, TorqueRequestBounds bounds, float amount);
     bool elapse_shift(GearChange req_lookup, AbstractProfile* profile, bool manually_requested);
     bool calcGearFromRatio(bool is_reverse);
+    void publish_shift_diagnostic(uint8_t shift_algorithm, GearChange change,
+        bool stationary, uint32_t shift_elapsed_ms);
+    void publish_idle_shift_diagnostic();
 
     AbstractProfile* current_profile = nullptr;
     portMUX_TYPE profile_mutex;
+    portMUX_TYPE shift_diag_mutex;
+    ShiftDiagnosticSnapshot shift_diag_snapshot = {};
+    uint32_t shift_diag_counter = 0;
     GearboxGear target_gear = GearboxGear::Park;
     GearboxGear actual_gear = GearboxGear::Park;
     GearboxGear last_fwd_gear = GearboxGear::Second;

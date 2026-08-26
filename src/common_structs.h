@@ -41,6 +41,50 @@ struct ShiftAlgoFeedback {
     int16_t s_targ;
 } __attribute__ ((packed));
 
+// Versioned, frozen forward-shift snapshot for RLI 0x2E. The shift task
+// publishes this once per 20 ms algorithm cycle so the host receives one
+// coherent record instead of temporally staggered RLI reads. TCC fields are
+// the latest controller-task snapshot. The controller task publishes an
+// inactive record between shifts for clean pre/post boundaries.
+struct ShiftDiagnosticSnapshot {
+    uint8_t schema_version;
+    uint8_t flags;
+    uint8_t gear_change;
+    uint8_t shift_algorithm;
+    uint8_t shift_phase;
+    uint8_t subphase_shift;
+    uint8_t subphase_mod;
+    uint8_t targ_act_gear;
+    uint8_t torque_req_ctrl_type;
+    uint8_t torque_req_bounds;
+    uint8_t tcc_state;
+    uint8_t tcc_reason;
+    uint8_t pedal_position;
+    int16_t atf_temp_c;
+    uint32_t sample_counter;
+    uint32_t capture_time_ms;
+    uint16_t shift_elapsed_ms;
+    uint16_t n2_rpm;
+    uint16_t n3_rpm;
+    uint16_t input_rpm;
+    uint16_t engine_rpm;
+    uint16_t output_rpm;
+    int16_t on_clutch_speed_rpm;
+    int16_t off_clutch_speed_rpm;
+    int16_t sync_rpm;
+    int16_t target_turbine_rpm;
+    uint16_t on_clutch_pressure_mbar;
+    uint16_t off_clutch_pressure_mbar;
+    uint16_t spc_pressure_mbar;
+    uint16_t mpc_pressure_mbar;
+    uint16_t tcc_controller_pressure_mbar;
+    uint16_t tcc_commanded_pressure_mbar;
+    int16_t torque_request_nm;
+    int16_t engine_torque_nm;
+    int16_t input_torque_nm;
+    int16_t tcc_signed_slip_rpm;
+} __attribute__ ((packed));
+
 /**
  * @brief Gearbox sensor data
  * This structure gets passed between a lot of the gearbox

@@ -594,6 +594,10 @@ void Kwp2000_server::process_read_data_local_ident(uint8_t* args, uint16_t arg_l
         DATA_TCC_DIRECT_SLIP r = get_tcc_direct_slip_data(this->gearbox_ptr);
         make_diag_pos_msg(SID_READ_DATA_LOCAL_IDENT, RLI_TCC_DIRECT_SLIP,
             (uint8_t*)&r, sizeof(DATA_TCC_DIRECT_SLIP));
+    } else if (args[0] == RLI_SHIFT_DIAGNOSTIC) {
+        DATA_SHIFT_DIAGNOSTIC r = get_shift_diagnostic_data(this->gearbox_ptr);
+        make_diag_pos_msg(SID_READ_DATA_LOCAL_IDENT, RLI_SHIFT_DIAGNOSTIC,
+            (uint8_t*)&r, sizeof(DATA_SHIFT_DIAGNOSTIC));
     } else if (args[0] == RLI_PRESSURES) {
         DATA_PRESSURES r = get_pressure_data(this->gearbox_ptr);
         make_diag_pos_msg(SID_READ_DATA_LOCAL_IDENT, RLI_PRESSURES, (uint8_t*)&r, sizeof(DATA_PRESSURES));

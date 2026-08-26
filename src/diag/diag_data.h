@@ -36,6 +36,7 @@
 #define RLI_NEXT_SW_PART_INFO   0x2B // Current FW size and address
 #define RLI_EMBED_FILE_INFO     0x2C // location and len of EMBED.ZIP
 #define RLI_TCC_DIRECT_SLIP     0x2D // V4 direct slip-feedback controller
+#define RLI_SHIFT_DIAGNOSTIC    0x2E // Atomic V10 shift/TCC diagnostic snapshot
 
 #define RLI_CLUTCH_SPEEDS   0x30
 #define RLI_SHIFTING_ALGO   0x31
@@ -185,6 +186,11 @@ typedef struct {
 static_assert(sizeof(DATA_TCC_DIRECT_SLIP) == 36,
     "DATA_TCC_DIRECT_SLIP wire size changed");
 
+typedef ShiftDiagnosticSnapshot DATA_SHIFT_DIAGNOSTIC;
+
+static_assert(sizeof(DATA_SHIFT_DIAGNOSTIC) == 63,
+    "DATA_SHIFT_DIAGNOSTIC wire size changed");
+
 typedef struct {
     uint32_t address;
     uint32_t size;
@@ -223,6 +229,7 @@ DATA_SYS_USAGE get_sys_usage(void);
 SHIFT_LIVE_INFO get_shift_live_Data(const EgsBaseCan* can_layer, Gearbox* g);
 DATA_TCC_PROGRAM get_tcc_program_data(Gearbox* gb_ptr);
 DATA_TCC_DIRECT_SLIP get_tcc_direct_slip_data(Gearbox* gb_ptr);
+DATA_SHIFT_DIAGNOSTIC get_shift_diagnostic_data(Gearbox* gb_ptr);
 
 // Read and write TCU Module settings
 
