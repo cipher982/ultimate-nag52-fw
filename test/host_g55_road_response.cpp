@@ -166,6 +166,12 @@ void test_loaded_upshift_handback_matches_measured_2_3_window() {
     assert(G55RoadResponsePolicy::loaded_upshift_torque_handback_cycles(
         true, false, true, 145, 466, 476, 2
     ) == 6);
+    assert(G55RoadResponsePolicy::loaded_upshift_torque_handback_cycles(
+        true, false, true, 96, 300, 500, 2
+    ) == 6);
+    assert(G55RoadResponsePolicy::loaded_upshift_torque_handback_cycles(
+        true, false, true, 96, 300, 501, 2
+    ) == 0);
 }
 
 void test_loaded_upshift_handback_preserves_gentle_and_d1_d2_behavior() {

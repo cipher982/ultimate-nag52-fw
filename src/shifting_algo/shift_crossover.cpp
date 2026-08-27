@@ -463,7 +463,11 @@ uint8_t CrossoverShift::phase_overlap2() {
         if (sid->ptr_r_clutch_speeds->on_clutch_speed <= this->threshold_rpm) {
             // Next phase
             this->timer_shift = 3;
-            this->trq_req_timer = 6;
+            // Preserve an earlier loaded-upshift handback. Resetting its
+            // countdown here would stretch ME torque recovery past sync.
+            if (!this->trq_req_up_ramp) {
+                this->trq_req_timer = 6;
+            }
             this->subphase_shift += 1;
         }
     } else if (3 == subphase_shift) {
