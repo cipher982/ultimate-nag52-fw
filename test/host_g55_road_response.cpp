@@ -157,6 +157,41 @@ void test_release_4_3_handback_starts_100_ms_after_baseline() {
     ));
 }
 
+void test_loaded_upshift_handback_matches_measured_2_3_window() {
+    // V10 22:23:47.922-.940: the clean loaded 2->3 had 568 RPM left,
+    // then crossed 476 RPM with pedal 145 and about 466 Nm input torque.
+    assert(G55RoadResponsePolicy::loaded_upshift_torque_handback_cycles(
+        true, false, true, 145, 466, 568, 2
+    ) == 0);
+    assert(G55RoadResponsePolicy::loaded_upshift_torque_handback_cycles(
+        true, false, true, 145, 466, 476, 2
+    ) == 6);
+}
+
+void test_loaded_upshift_handback_preserves_gentle_and_d1_d2_behavior() {
+    assert(G55RoadResponsePolicy::loaded_upshift_torque_handback_cycles(
+        true, false, true, 90, 234, 476, 2
+    ) == 0);
+    assert(G55RoadResponsePolicy::loaded_upshift_torque_handback_cycles(
+        true, true, true, 145, 466, 476, 2
+    ) == 0);
+    assert(G55RoadResponsePolicy::loaded_upshift_torque_handback_cycles(
+        false, false, true, 145, 466, 476, 2
+    ) == 0);
+}
+
+void test_loaded_upshift_handback_requires_active_reduction_and_inertia_phase() {
+    assert(G55RoadResponsePolicy::loaded_upshift_torque_handback_cycles(
+        true, false, false, 145, 466, 476, 2
+    ) == 0);
+    assert(G55RoadResponsePolicy::loaded_upshift_torque_handback_cycles(
+        true, false, true, 145, 466, 476, 1
+    ) == 0);
+    assert(G55RoadResponsePolicy::loaded_upshift_torque_handback_cycles(
+        true, false, true, 145, 466, 0, 3
+    ) == 0);
+}
+
 } // namespace
 
 int main() {
@@ -171,6 +206,9 @@ int main() {
     test_d5_upshift_gate_prevents_immediate_reversal();
     test_release_4_3_hold_is_narrowly_scoped();
     test_release_4_3_handback_starts_100_ms_after_baseline();
+    test_loaded_upshift_handback_matches_measured_2_3_window();
+    test_loaded_upshift_handback_preserves_gentle_and_d1_d2_behavior();
+    test_loaded_upshift_handback_requires_active_reduction_and_inertia_phase();
     std::cout << "G55 road-response policy tests passed\n";
     return 0;
 }

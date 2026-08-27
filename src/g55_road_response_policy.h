@@ -19,6 +19,17 @@ constexpr uint8_t kD5DownshiftQualificationCycles = 10;
 constexpr int16_t kRelease43InputTorqueMinimumNm = 100;
 constexpr uint8_t kRelease43HandbackDelayCycles = 5;
 
+// The V10 road trace shows ME torque still recovering after physical ratio
+// synchronization on loaded D2-D5 upshifts.  Begin a six-cycle handback over
+// the final 500 RPM of oncoming-clutch synchronization so the existing torque
+// reduction reaches zero before, rather than after, the driver-felt endpoint.
+// D1->D2 is excluded because its converter is intentionally open and the same
+// trace shows no post-sync torque deficit there.
+constexpr uint8_t kLoadedUpshiftPedalMinimumRaw = 96;
+constexpr int16_t kLoadedUpshiftInputTorqueMinimumNm = 300;
+constexpr int16_t kLoadedUpshiftHandbackStartRpm = 500;
+constexpr uint8_t kLoadedUpshiftHandbackCycles = 6;
+
 inline int32_t blend_factor_per_mille(
     int32_t value,
     int32_t start,
@@ -187,6 +198,25 @@ inline bool consume_post_overlap_hold_cycle(uint8_t* remaining_cycles) {
     }
     *remaining_cycles -= 1;
     return *remaining_cycles == 0;
+}
+
+inline uint8_t loaded_upshift_torque_handback_cycles(
+    bool is_upshift,
+    bool is_first_to_second,
+    bool torque_reduction_active,
+    uint8_t pedal_raw,
+    int16_t input_torque_nm,
+    int16_t on_clutch_speed_rpm,
+    uint8_t overlap_subphase
+) {
+    const bool in_final_inertia_window = overlap_subphase >= 2 &&
+        on_clutch_speed_rpm > 0 &&
+        on_clutch_speed_rpm <= kLoadedUpshiftHandbackStartRpm;
+    return is_upshift && !is_first_to_second && torque_reduction_active &&
+        pedal_raw >= kLoadedUpshiftPedalMinimumRaw &&
+        input_torque_nm >= kLoadedUpshiftInputTorqueMinimumNm &&
+        in_final_inertia_window
+        ? kLoadedUpshiftHandbackCycles : 0;
 }
 
 } // namespace G55RoadResponsePolicy

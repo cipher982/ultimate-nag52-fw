@@ -1,5 +1,6 @@
 #include "shift_crossover.h"
 #include <egs_calibration/calibration_structs.h>
+#include "g55_road_response_policy.h"
 #include <math.h>
 
 const DRAM_ATTR uint8_t PHASE_BLEED            = 0;
@@ -495,9 +496,27 @@ uint8_t CrossoverShift::phase_overlap2() {
         }
     }
 
-    if (!this->trq_req_up_ramp && sid->ptr_r_clutch_speeds->on_clutch_speed < this->threshold_rpm && subphase_shift >= 2) {
-        this->trq_req_timer = 3;
-        this->trq_req_up_ramp = true;
+    if (!this->trq_req_up_ramp) {
+        const uint8_t loaded_upshift_handback_cycles =
+            G55RoadResponsePolicy::loaded_upshift_torque_handback_cycles(
+                this->upshifting,
+                sid->change == GearChange::_1_2,
+                this->trq_req_down_ramp,
+                sd->pedal_pos,
+                sd->input_torque,
+                sid->ptr_r_clutch_speeds->on_clutch_speed,
+                subphase_shift
+            );
+        if (loaded_upshift_handback_cycles > 0) {
+            this->trq_req_timer = loaded_upshift_handback_cycles;
+            this->trq_req_up_ramp = true;
+        } else if (
+            sid->ptr_r_clutch_speeds->on_clutch_speed < this->threshold_rpm &&
+            subphase_shift >= 2
+        ) {
+            this->trq_req_timer = 3;
+            this->trq_req_up_ramp = true;
+        }
     }
 
     int torque = MAX(0, (int)abs_input_trq + this->trq_adder + this->correction_trq);
