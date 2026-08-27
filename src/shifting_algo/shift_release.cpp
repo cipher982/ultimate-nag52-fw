@@ -1,6 +1,7 @@
 #include "shift_release.h"
 #include <egs_calibration/calibration_structs.h>
 #include "nvs/module_settings.h"
+#include "g55_road_response_policy.h"
 
 const DRAM_ATTR uint8_t PHASE_BLEED = 0;
 const DRAM_ATTR uint8_t PHASE_FILL_AND_RELEASE = 1;
@@ -168,6 +169,17 @@ uint8_t ReleasingShift::step_internal(
         sid->ptr_w_trq_req->ty = TorqueRequestControlType::None;
         sid->ptr_w_trq_req->amount = 0;
         sid->ptr_w_trq_req->bounds = TorqueRequestBounds::LessThan;
+    }
+
+    // The loaded 4->3 road events reached maximum-pressure while the applying
+    // clutch was still settling. Hold the already-active torque reduction for
+    // five complete 20 ms cycles, then use the existing three-cycle handback.
+    if (phase_id == PHASE_MAX_PRESSURE &&
+        G55RoadResponsePolicy::consume_post_overlap_hold_cycle(
+            &this->post_overlap_torque_hold_cycles
+        )) {
+        this->trq_req_up_ramp = true;
+        this->trq_req_timer = 3;
     }
 
     return ret;
@@ -429,8 +441,16 @@ uint8_t ReleasingShift::phase_overlap() {
 
     if (this->timer_shift == 0) {
         sid->tcc->shift_end();
-        this->trq_req_up_ramp = true;
-        this->trq_req_timer = 3;
+        this->post_overlap_torque_hold_cycles =
+            G55RoadResponsePolicy::release_4_3_post_overlap_hold_cycles(
+                sid->change == GearChange::_4_3,
+                (sid->shift_flags & SHIFT_FLAG_COAST) != 0,
+                sd->input_torque
+            );
+        if (this->post_overlap_torque_hold_cycles == 0) {
+            this->trq_req_up_ramp = true;
+            this->trq_req_timer = 3;
+        }
         ret = PHASE_MAX_PRESSURE;
     }
     return ret;

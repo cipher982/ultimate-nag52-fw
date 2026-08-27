@@ -3,6 +3,7 @@
 #include "tcu_maths.h"
 #include "gearbox.h"
 #include "maps.h"
+#include "g55_road_response_policy.h"
 #include "nvs/all_keys.h"
 #include "nvs/module_settings.h"
 #include <tcu_maths_impl.h>
@@ -386,8 +387,21 @@ void StandardProfile::update(SensorData* sensors) {
 
 bool StandardProfile::should_downshift(GearboxGear current_gear, SensorData* sensors) {
     if (current_gear == GearboxGear::First) { return false; }
-    if (this->upshift_table != nullptr) { // TEST TABLE
-        return sensors->input_rpm < this->downshift_table->get_value(sensors->pedal_pos/2.5, (float)current_gear);
+    if (this->downshift_table != nullptr) { // TEST TABLE
+        const uint16_t stored_map_threshold_rpm =
+            this->downshift_table->get_value(
+                sensors->pedal_pos / 2.5,
+                (float)current_gear
+            );
+        if (current_gear == GearboxGear::Fifth) {
+            return G55RoadResponsePolicy::should_downshift_from_d5(
+                sensors->input_rpm,
+                stored_map_threshold_rpm,
+                sensors->pedal_pos,
+                sensors->input_torque
+            );
+        }
+        return sensors->input_rpm < stored_map_threshold_rpm;
     } else {
         return false;
     }

@@ -52,6 +52,7 @@ private:
     int spc_step_adder = 0;
     int spc_wait_adder = 0;
     int minimum_mod_reduction_trq = 0;
+    uint8_t post_overlap_torque_hold_cycles = 0;
 };
 
 #endif
