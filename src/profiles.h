@@ -4,6 +4,7 @@
 #define PROFILES_H
 
 #include "common_structs.h"
+#include "g55_road_response_policy.h"
 #include "stored_map.h"
 
 const uint8_t NUM_PROFILES = 6u; // S, C, W, A, M, R
@@ -162,6 +163,7 @@ private:
     int32_t accel_delta_factor = 0;
     SensorData last_sensors = {};
     uint32_t last_check = 0;
+    G55RoadResponsePolicy::D5DownshiftQualifier d5_downshift_qualifier;
 };
 
 class ManualProfile : public AbstractProfile {

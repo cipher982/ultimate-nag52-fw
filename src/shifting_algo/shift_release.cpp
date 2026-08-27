@@ -98,6 +98,18 @@ uint8_t ReleasingShift::step_internal(
         ret = STEP_RES_END_SHIFT; // WTF? Should never happen
     }
 
+    // Baseline begins torque handback on the overlap-completion tick. For the
+    // measured loaded 4->3 case, begin it five 20 ms ticks later. Consuming
+    // before torque calculation makes the fifth max-pressure tick the first
+    // up-ramp tick: exactly 100 ms later, not 120 ms.
+    if (phase_id == PHASE_MAX_PRESSURE &&
+        G55RoadResponsePolicy::consume_post_overlap_hold_cycle(
+            &this->post_overlap_torque_hold_cycles
+        )) {
+        this->trq_req_up_ramp = true;
+        this->trq_req_timer = 3;
+    }
+
     // Do torque request stuff here
     this->torque_req_out = 0;
     if (sd->indicated_torque > sd->min_torque && sd->converted_torque > sd->min_torque && sd->engine_rpm > 1100) {
@@ -169,17 +181,6 @@ uint8_t ReleasingShift::step_internal(
         sid->ptr_w_trq_req->ty = TorqueRequestControlType::None;
         sid->ptr_w_trq_req->amount = 0;
         sid->ptr_w_trq_req->bounds = TorqueRequestBounds::LessThan;
-    }
-
-    // The loaded 4->3 road events reached maximum-pressure while the applying
-    // clutch was still settling. Hold the already-active torque reduction for
-    // five complete 20 ms cycles, then use the existing three-cycle handback.
-    if (phase_id == PHASE_MAX_PRESSURE &&
-        G55RoadResponsePolicy::consume_post_overlap_hold_cycle(
-            &this->post_overlap_torque_hold_cycles
-        )) {
-        this->trq_req_up_ramp = true;
-        this->trq_req_timer = 3;
     }
 
     return ret;
@@ -444,7 +445,8 @@ uint8_t ReleasingShift::phase_overlap() {
         this->post_overlap_torque_hold_cycles =
             G55RoadResponsePolicy::release_4_3_post_overlap_hold_cycles(
                 sid->change == GearChange::_4_3,
-                (sid->shift_flags & SHIFT_FLAG_COAST) != 0,
+                (sid->shift_flags &
+                    (SHIFT_FLAG_COAST | SHIFT_FLAG_COAST_54_43)) != 0,
                 sd->input_torque
             );
         if (this->post_overlap_torque_hold_cycles == 0) {

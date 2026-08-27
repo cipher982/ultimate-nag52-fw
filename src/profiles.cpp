@@ -4,6 +4,7 @@
 #include "gearbox.h"
 #include "maps.h"
 #include "g55_road_response_policy.h"
+#include "egs_calibration/calibration_structs.h"
 #include "nvs/all_keys.h"
 #include "nvs/module_settings.h"
 #include <tcu_maths_impl.h>
@@ -345,6 +346,7 @@ GearboxDisplayGear StandardProfile::get_display_gear(GearboxGear target, Gearbox
 
 bool StandardProfile::should_upshift(GearboxGear current_gear, SensorData* sensors) {
     if (current_gear == GearboxGear::Fifth) { return false; }
+    this->d5_downshift_qualifier.reset();
     if (this->upshift_table != nullptr) { // TEST TABLE
         // RPM where we will upshift based on the current load
         uint16_t upshift_map_val = this->upshift_table->get_value(sensors->pedal_pos/2.5, (float)current_gear);
@@ -365,6 +367,22 @@ bool StandardProfile::should_upshift(GearboxGear current_gear, SensorData* senso
             can_upshift = false;
         }
         if (sensors->brake_pressed) { can_upshift = false; }
+        if (can_upshift && current_gear == GearboxGear::Fourth &&
+            this->downshift_table != nullptr) {
+            const uint16_t d5_stored_map_threshold_rpm =
+                this->downshift_table->get_value(
+                    sensors->pedal_pos / 2.5,
+                    (float)GearboxGear::Fifth
+                );
+            can_upshift =
+                G55RoadResponsePolicy::four_to_five_is_allowed_by_d5_policy(
+                    sensors->output_rpm,
+                    MECH_PTR->ratio_table[5],
+                    d5_stored_map_threshold_rpm,
+                    sensors->pedal_pos,
+                    sensors->input_torque
+                );
+        }
         return can_upshift;
     } else {
         return false;
@@ -386,7 +404,10 @@ void StandardProfile::update(SensorData* sensors) {
 }
 
 bool StandardProfile::should_downshift(GearboxGear current_gear, SensorData* sensors) {
-    if (current_gear == GearboxGear::First) { return false; }
+    if (current_gear == GearboxGear::First) {
+        this->d5_downshift_qualifier.reset();
+        return false;
+    }
     if (this->downshift_table != nullptr) { // TEST TABLE
         const uint16_t stored_map_threshold_rpm =
             this->downshift_table->get_value(
@@ -394,15 +415,18 @@ bool StandardProfile::should_downshift(GearboxGear current_gear, SensorData* sen
                 (float)current_gear
             );
         if (current_gear == GearboxGear::Fifth) {
-            return G55RoadResponsePolicy::should_downshift_from_d5(
+            return G55RoadResponsePolicy::d5_downshift_decision(
                 sensors->input_rpm,
                 stored_map_threshold_rpm,
                 sensors->pedal_pos,
-                sensors->input_torque
+                sensors->input_torque,
+                &this->d5_downshift_qualifier
             );
         }
+        this->d5_downshift_qualifier.reset();
         return sensors->input_rpm < stored_map_threshold_rpm;
     } else {
+        this->d5_downshift_qualifier.reset();
         return false;
     }
 }
