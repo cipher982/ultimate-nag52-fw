@@ -219,6 +219,16 @@ inline uint8_t loaded_upshift_torque_handback_cycles(
         ? kLoadedUpshiftHandbackCycles : 0;
 }
 
+inline void initialize_torque_handback_timer_if_inactive(
+    bool handback_active,
+    uint8_t initial_cycles,
+    uint8_t* timer_cycles
+) {
+    if (!handback_active) {
+        *timer_cycles = initial_cycles;
+    }
+}
+
 } // namespace G55RoadResponsePolicy
 
 #endif

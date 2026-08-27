@@ -198,6 +198,19 @@ void test_loaded_upshift_handback_requires_active_reduction_and_inertia_phase() 
     ) == 0);
 }
 
+void test_subphase_transition_does_not_restart_active_handback() {
+    uint8_t timer = 2;
+    G55RoadResponsePolicy::initialize_torque_handback_timer_if_inactive(
+        true, 6, &timer
+    );
+    assert(timer == 2);
+
+    G55RoadResponsePolicy::initialize_torque_handback_timer_if_inactive(
+        false, 6, &timer
+    );
+    assert(timer == 6);
+}
+
 } // namespace
 
 int main() {
@@ -215,6 +228,7 @@ int main() {
     test_loaded_upshift_handback_matches_measured_2_3_window();
     test_loaded_upshift_handback_preserves_gentle_and_d1_d2_behavior();
     test_loaded_upshift_handback_requires_active_reduction_and_inertia_phase();
+    test_subphase_transition_does_not_restart_active_handback();
     std::cout << "G55 road-response policy tests passed\n";
     return 0;
 }

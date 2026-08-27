@@ -465,9 +465,11 @@ uint8_t CrossoverShift::phase_overlap2() {
             this->timer_shift = 3;
             // Preserve an earlier loaded-upshift handback. Resetting its
             // countdown here would stretch ME torque recovery past sync.
-            if (!this->trq_req_up_ramp) {
-                this->trq_req_timer = 6;
-            }
+            G55RoadResponsePolicy::initialize_torque_handback_timer_if_inactive(
+                this->trq_req_up_ramp,
+                6,
+                &this->trq_req_timer
+            );
             this->subphase_shift += 1;
         }
     } else if (3 == subphase_shift) {
