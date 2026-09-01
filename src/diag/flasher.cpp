@@ -69,6 +69,9 @@ void Flasher::on_request_download(const uint8_t* args, uint16_t arg_len, DiagMes
     int erase_len = (dest_mem_size + 4096 - 1) & -4096;
     // Disable TCC Slenoid since the ISR causes flash cache errors
     sol_tcc->isr_disable();
+    if (nullptr != ioexpander) {
+        ioexpander->diag_disable();
+    }
     vTaskDelay(20);
     if (esp_flash_erase_region(esp_flash_default_chip, dest_mem_address, erase_len) != ESP_OK) {
         global_make_diag_neg_msg(dest, SID_REQ_DOWNLOAD, NRC_GENERAL_REJECT);
