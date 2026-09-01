@@ -1154,11 +1154,18 @@ void Kwp2000_server::process_write_mem_by_address(uint8_t* args, uint16_t arg_le
         uint8_t* buffer = (uint8_t*)TCU_HEAP_ALLOC(SECTOR_SIZE);
         esp_flash_read(NULL, buffer, sec_start_addr, SECTOR_SIZE);
         memcpy(&buffer[offset_into_start_sector], src, len);
-        esp_flash_erase_region(NULL, sec_start_addr, SECTOR_SIZE);
-        if (ESP_OK == esp_flash_write(NULL, buffer, sec_start_addr, SECTOR_SIZE)) {
+        sol_tcc->isr_disable();
+        vTaskDelay(5);
+        esp_err_t erase_result = esp_flash_erase_region(NULL, sec_start_addr, SECTOR_SIZE);
+        esp_err_t write_result = ESP_FAIL;
+        if (ESP_OK == erase_result) {
+            write_result = esp_flash_write(NULL, buffer, sec_start_addr, SECTOR_SIZE);
+        }
+        sol_tcc->isr_enable();
+        if (ESP_OK == write_result) {
             make_diag_pos_msg(SID_READ_MEM_BY_ADDRESS, nullptr, 0);
         } else {
-            // Read failed
+            // Write failed
             make_diag_neg_msg(SID_READ_MEM_BY_ADDRESS, NRC_GENERAL_REJECT);
         }
         delete[] buffer;

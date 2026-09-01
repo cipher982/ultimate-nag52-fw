@@ -57,6 +57,8 @@ esp_err_t EEPROM::check_if_new_fw(bool* dest) {
 }
 
 esp_err_t EEPROM::write_nvs_map_data(const char* map_name, const int16_t* to_write, size_t map_element_count) {
+    sol_tcc->isr_disable();
+    vTaskDelay(5);
     esp_err_t e = nvs_set_blob(MAP_NVS_HANDLE, map_name, to_write, map_element_count*sizeof(int16_t));
     if (e != ESP_OK) {
         ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "Error setting value for %s (%s)", map_name, esp_err_to_name(e));
@@ -66,6 +68,7 @@ esp_err_t EEPROM::write_nvs_map_data(const char* map_name, const int16_t* to_wri
             ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "Error calling nvs_commit: %s", esp_err_to_name(e));
         }
     }
+    sol_tcc->isr_enable();
     return e;
 }
 

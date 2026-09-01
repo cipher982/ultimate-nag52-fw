@@ -16,7 +16,22 @@ Flasher::Flasher(EgsBaseCan *can_ref, Gearbox* gearbox) {
 }
 
 Flasher::~Flasher() {
+    this->enable_tcc_isr();
     this->gearbox_ref->diag_regain_control(); // Re-enable engine starting
+}
+
+void Flasher::disable_tcc_isr() {
+    if (!this->tcc_isr_disabled) {
+        sol_tcc->isr_disable();
+        this->tcc_isr_disabled = true;
+    }
+}
+
+void Flasher::enable_tcc_isr() {
+    if (this->tcc_isr_disabled) {
+        sol_tcc->isr_enable();
+        this->tcc_isr_disabled = false;
+    }
 }
 
 /**
@@ -68,12 +83,13 @@ void Flasher::on_request_download(const uint8_t* args, uint16_t arg_len, DiagMes
     // Must be 4096 byte sector aligned
     int erase_len = (dest_mem_size + 4096 - 1) & -4096;
     // Disable TCC Slenoid since the ISR causes flash cache errors
-    sol_tcc->isr_disable();
+    this->disable_tcc_isr();
     if (nullptr != ioexpander) {
         ioexpander->diag_disable();
     }
     vTaskDelay(20);
     if (esp_flash_erase_region(esp_flash_default_chip, dest_mem_address, erase_len) != ESP_OK) {
+        this->enable_tcc_isr();
         global_make_diag_neg_msg(dest, SID_REQ_DOWNLOAD, NRC_GENERAL_REJECT);
         return;
     }
@@ -167,6 +183,8 @@ void Flasher::on_transfer_data(uint8_t* args, uint16_t arg_len, DiagMessage* des
             // Next block
             this->block_counter++;
             if (esp_flash_write(esp_flash_default_chip, (const void*)&args[1], this->start_addr + this->written_data, arg_len-1) != ESP_OK) {
+                this->data_dir = 0;
+                this->enable_tcc_isr();
                 global_make_diag_neg_msg(dest, SID_TRANSFER_DATA, NRC_UN52_OTA_WRITE_FAIL);
                 return;
             } else {
@@ -205,6 +223,7 @@ void Flasher::on_transfer_data(uint8_t* args, uint16_t arg_len, DiagMessage* des
 
 void Flasher::on_transfer_exit(uint8_t* args, uint16_t arg_len, DiagMessage* dest) {
     this->data_dir = 0; // Invalidate it
+    this->enable_tcc_isr();
     // Return control back to TCM
     if (nullptr != this->gearbox_ref) {
         this->gearbox_ref->diag_regain_control();
@@ -213,6 +232,7 @@ void Flasher::on_transfer_exit(uint8_t* args, uint16_t arg_len, DiagMessage* des
 }
 
 void Flasher::on_request_verification(uint8_t* args, uint16_t arg_len, DiagMessage* dest) {
+    this->enable_tcc_isr();
     uint8_t res[2] = {0xE1, 0x00};
     if (this->is_ota) {
         // Only for OTA update

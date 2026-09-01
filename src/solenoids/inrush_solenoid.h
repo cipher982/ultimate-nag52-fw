@@ -39,7 +39,7 @@ private:
     bool off = false;
     gpio_num_t zener_pin = GPIO_NUM_NC;
     gpio_num_t pwm_pin = GPIO_NUM_NC;
-    bool isr_disabled = false;
+    uint32_t isr_disable_depth = 0;
 };
 
 #endif
