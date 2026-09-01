@@ -223,7 +223,9 @@ void Flasher::on_transfer_data(uint8_t* args, uint16_t arg_len, DiagMessage* des
 
 void Flasher::on_transfer_exit(uint8_t* args, uint16_t arg_len, DiagMessage* dest) {
     this->data_dir = 0; // Invalidate it
-    this->enable_tcc_isr();
+    if (!this->is_ota) {
+        this->enable_tcc_isr();
+    }
     // Return control back to TCM
     if (nullptr != this->gearbox_ref) {
         this->gearbox_ref->diag_regain_control();
@@ -232,7 +234,6 @@ void Flasher::on_transfer_exit(uint8_t* args, uint16_t arg_len, DiagMessage* des
 }
 
 void Flasher::on_request_verification(uint8_t* args, uint16_t arg_len, DiagMessage* dest) {
-    this->enable_tcc_isr();
     uint8_t res[2] = {0xE1, 0x00};
     if (this->is_ota) {
         // Only for OTA update
@@ -247,12 +248,14 @@ void Flasher::on_request_verification(uint8_t* args, uint16_t arg_len, DiagMessa
         if (e != ESP_OK) {
             res[1] = FLASH_CHECK_STATUS_INVALID;
             ESP_LOG_LEVEL(ESP_LOG_ERROR, "FLASHER", "Flash check failed! %s", esp_err_to_name(e));
+            this->enable_tcc_isr();
             return global_make_diag_pos_msg(dest, SID_START_ROUTINE_BY_LOCAL_IDENT, res, 2);
         }
         e = esp_ota_set_boot_partition(part);
         if (e != ESP_OK) {
             res[1] = FLASH_CHECK_STATUS_INVALID;
             ESP_LOG_LEVEL(ESP_LOG_ERROR, "FLASHER", "Set boot partition failed! %s", esp_err_to_name(e));
+            this->enable_tcc_isr();
             return global_make_diag_pos_msg(dest, SID_START_ROUTINE_BY_LOCAL_IDENT, res, 2);
         }
         res[1] = FLASH_CHECK_STATUS_OK;
@@ -260,5 +263,6 @@ void Flasher::on_request_verification(uint8_t* args, uint16_t arg_len, DiagMessa
     } else {
         res[1] = FLASH_CHECK_STATUS_OK;
     }
+    this->enable_tcc_isr();
     return global_make_diag_pos_msg(dest, SID_START_ROUTINE_BY_LOCAL_IDENT, res, 2);
 }
