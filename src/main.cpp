@@ -1,6 +1,8 @@
 #ifndef UNIT_TEST
 
 #include "clock.hpp"
+#include "esp_system.h"
+#include "diag/boot_info.h"
 #include "embed_data.h"
 
 #include "solenoids/solenoids.h"
@@ -310,6 +312,20 @@ const char *post_code_to_str(SPEAKER_POST_CODE s)
 
 extern "C" void app_main(void)
 {
+    // First statement in the program, deliberately.
+    //
+    // Until 2026-09-04 this firmware never asked why it had restarted, so no
+    // restart ever reported its own cause. Five transmission-controller
+    // reboots on entry to Park were diagnosed entirely from the CAN wire --
+    // payloads reverting to FF fill and a rolling counter driven to zero --
+    // which proves the object was reconstructed but says nothing about whether
+    // it was a panic, a watchdog, a brownout, or a deliberate reset. Those
+    // demand completely different fixes.
+    //
+    // esp_reset_reason() is valid from boot and costs nothing. Exposed on
+    // RLI_BOOT_INFO so a laptop can read it after the fact, because a UART
+    // banner is only useful when somebody is sitting there with a cable.
+    BootInfo::record_reset_reason();
     esp_log_level_set("gpio", esp_log_level_t::ESP_LOG_NONE);
     // Set all pointers
     gearbox = nullptr;

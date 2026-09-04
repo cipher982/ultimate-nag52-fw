@@ -37,6 +37,7 @@
 #define RLI_EMBED_FILE_INFO     0x2C // location and len of EMBED.ZIP
 #define RLI_TCC_DIRECT_SLIP     0x2D // V4 direct slip-feedback controller
 #define RLI_SHIFT_DIAGNOSTIC    0x2E // Atomic V10 shift/TCC diagnostic snapshot
+#define RLI_BOOT_INFO           0x2F // Why the TCU last restarted, and uptime
 
 #define RLI_CLUTCH_SPEEDS   0x30
 #define RLI_SHIFTING_ALGO   0x31

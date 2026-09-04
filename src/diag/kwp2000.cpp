@@ -1,4 +1,5 @@
 #include "kwp2000.h"
+#include "boot_info.h"
 #include <esp_ota_ops.h>
 #include <string>
 #include <time.h>
@@ -601,6 +602,16 @@ void Kwp2000_server::process_read_data_local_ident(uint8_t* args, uint16_t arg_l
     } else if (args[0] == RLI_PRESSURES) {
         DATA_PRESSURES r = get_pressure_data(this->gearbox_ptr);
         make_diag_pos_msg(SID_READ_DATA_LOCAL_IDENT, RLI_PRESSURES, (uint8_t*)&r, sizeof(DATA_PRESSURES));
+    } else if (args[0] == RLI_BOOT_INFO) {
+        // Read-only, no side effects, no flash access: safe to ask at any time,
+        // including immediately after an unexplained restart.
+        BOOT_INFO r = {
+            .schema = 1u,
+            .reset_reason = BootInfo::get_reset_reason(),
+            .reserved = 0u,
+            .uptime_ms = GET_CLOCK_TIME(),
+        };
+        make_diag_pos_msg(SID_READ_DATA_LOCAL_IDENT, RLI_BOOT_INFO, (uint8_t*)&r, sizeof(BOOT_INFO));
     } else if (args[0] == RLI_TCU_TIME) {
         uint32_t now = GET_CLOCK_TIME();
         make_diag_pos_msg(SID_READ_DATA_LOCAL_IDENT, RLI_TCU_TIME, (uint8_t*)&now, sizeof(now));
