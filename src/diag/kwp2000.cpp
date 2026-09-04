@@ -832,7 +832,10 @@ void Kwp2000_server::process_ioctl_by_local_ident(uint8_t* args, uint16_t arg_le
 
         if (arg_len == 2 && args[1] == 0x00) { // Return control back to ECU
             CURRENT_DEVICE_MODE = DEVICE_MODE_NORMAL;
+            sol_tcc->isr_disable();
+            vTaskDelay(5);
             EEPROM::set_device_mode(DEVICE_MODE_NORMAL);
+            sol_tcc->isr_enable();
             uint8_t resp[3] = {0x10, 0x00};
             make_diag_pos_msg(SID_IOCTL_BY_LOCAL_IDENT, resp, 2);
         } else if (arg_len == 2 && args[1] == 0x01) { // Report current device mode
@@ -846,7 +849,10 @@ void Kwp2000_server::process_ioctl_by_local_ident(uint8_t* args, uint16_t arg_le
         } else if (arg_len == 4 && args[1] == 0x08) { // Change device mode and save to EEPROM!
             uint16_t mode_req = (args[2] << 8) | args[3];
             CURRENT_DEVICE_MODE = mode_req;
+            sol_tcc->isr_disable();
+            vTaskDelay(5);
             EEPROM::set_device_mode(mode_req);
+            sol_tcc->isr_enable();
             uint8_t resp[4] = {0x10, 0x08, (uint8_t)((CURRENT_DEVICE_MODE >> 8) & 0xFF), (uint8_t)(CURRENT_DEVICE_MODE & 0xFF)};
             make_diag_pos_msg(SID_IOCTL_BY_LOCAL_IDENT, resp, 4);
         } else {

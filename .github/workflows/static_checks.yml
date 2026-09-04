@@ -1,0 +1,27 @@
+name: Static checks
+
+# Runs on everything, including pull requests, because the check it carries
+# guards a class of bug that is invisible in review and expensive to find:
+# an unguarded flash write reached the vehicle and caused five transmission
+# controller restarts before anyone knew it was there.
+#
+# No toolchain, no build, no hardware. Seconds.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  nvs-isr-guard:
+    name: Flash writes hold the TCC timer ISR guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check every flash write is guarded
+        run: python3 tools/check_nvs_isr_guard.py
+      - name: List call sites (for the log, on failure)
+        if: failure()
+        run: python3 tools/check_nvs_isr_guard.py --list || true
