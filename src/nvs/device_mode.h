@@ -2,6 +2,10 @@
 #define __DEVICE_MODE_H_
 
 #include <stdint.h>
+#include "esp_err.h"
+
+class EgsBaseCan;
+esp_err_t change_device_mode(EgsBaseCan* can, uint16_t requested, bool persist);
 
 // Wrapped into uint16_t
 extern uint16_t CURRENT_DEVICE_MODE;

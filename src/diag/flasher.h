@@ -35,9 +35,11 @@ class Flasher {
         void on_transfer_data(uint8_t* args, uint16_t arg_len, DiagMessage* dest, bool using_can);
         void on_transfer_exit(uint8_t* args, uint16_t arg_len, DiagMessage* dest);
         void on_request_verification(uint8_t* args, uint16_t arg_len, DiagMessage* dest);
+        void poll_safety();
     private:
-        void disable_tcc_isr();
-        void enable_tcc_isr();
+        esp_err_t finish_session();
+        TccFlashGuard flash_guard{false};
+        bool transfer_complete = false;
         Gearbox* gearbox_ref;
         EgsBaseCan* can_ref;
         uint8_t block_counter = 0;
@@ -54,7 +56,6 @@ class Flasher {
         size_t read_bytes;
         size_t read_bytes_total;
         bool is_ota = false;
-        bool tcc_isr_disabled = false;
 };
 
 #endif

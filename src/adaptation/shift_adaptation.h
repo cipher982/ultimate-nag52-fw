@@ -9,6 +9,9 @@
 class ShiftAdaptationSystem  {
 public:
     ShiftAdaptationSystem();
+    ~ShiftAdaptationSystem();
+    ShiftAdaptationSystem(const ShiftAdaptationSystem&) = delete;
+    ShiftAdaptationSystem& operator=(const ShiftAdaptationSystem&) = delete;
     void init_shift();
     void update();
     int8_t get_prefill_cycles_offset(uint8_t shift_idx);

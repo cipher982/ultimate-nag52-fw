@@ -2,9 +2,16 @@
 #include "esp_log.h"
 #include "clock.hpp"
 #include "board_config.h"
+#include "esp_memory_utils.h"
 
 IOExpander::IOExpander(gpio_num_t sda, gpio_num_t scl)
 {
+	// The cache-safe I2C ISR receives directly into this object's member buffer.
+	// Reject an external-RAM allocation rather than depending on flash cache.
+	if (!esp_ptr_internal(this)) {
+		init_status = ESP_ERR_INVALID_STATE;
+		return;
+	}
 	if ((gpio_num_t::GPIO_NUM_NC != sda) && (gpio_num_t::GPIO_NUM_NC != scl))
 	{
 		// init I/O expander module
@@ -15,7 +22,7 @@ IOExpander::IOExpander(gpio_num_t sda, gpio_num_t scl)
 			.clk_source = I2C_CLK_SRC_DEFAULT,
 			.glitch_ignore_cnt = 7,
 			.intr_priority = 0,
-			.trans_queue_depth = 4,
+			.trans_queue_depth = 0, // Synchronous: stack requests/buffers live until completion.
 			.flags {
 				.enable_internal_pullup = true
 			}
@@ -82,11 +89,6 @@ esp_err_t IOExpander::init_state(void) const
 	return init_status;
 }
 
-void IOExpander::diag_disable() {
-	i2c_master_bus_rm_device(this->dev_handle);
-	i2c_del_master_bus(this->bus_handle);
-	this->init_status = ESP_ERR_INVALID_STATE;
-}
 
 void IOExpander::read_from_ioexpander(void)
 {
@@ -125,7 +127,8 @@ void IOExpander::write_to_ioexpander(void)
 
 bool IOExpander::is_data_valid(const uint32_t expire_time_ms) const
 {
-	return expire_time_ms > (GET_CLOCK_TIME() - last_i2c_query_time);
+	return init_status == ESP_OK && last_i2c_query_time != 0 &&
+		expire_time_ms > (GET_CLOCK_TIME() - last_i2c_query_time);
 }
 
 inline bool IOExpander::get_bool_value(const pca_num_t bit, const uint8_t *i2c_rx_bytes)

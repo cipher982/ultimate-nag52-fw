@@ -250,13 +250,8 @@ TCM_CORE_CONFIG get_tcm_config(void) {
 }
 
 kwp_result_t set_tcm_config(TCM_CORE_CONFIG cfg) {
-    ShifterPosition pos = (egs_can_hal == nullptr || gearbox == nullptr) ? ShifterPosition::SignalNotAvailable : egs_can_hal->get_shifter_position(250);
-    if (
-        pos == ShifterPosition::D || pos == ShifterPosition::MINUS || pos == ShifterPosition::PLUS || pos == ShifterPosition::R || // Stationary positions
-        pos == ShifterPosition::N_D || pos == ShifterPosition::P_R || pos == ShifterPosition::R_N // Intermediate positions
-        ) {
-            ESP_LOG_LEVEL(ESP_LOG_ERROR, "SET_TCM_CFG", "Rejecting download request. Shifter not in valid position");
-            return NRC_CONDITIONS_NOT_CORRECT_REQ_SEQ_ERROR;
+    if (!is_stationary_passive(egs_can_hal)) {
+        return NRC_CONDITIONS_NOT_CORRECT_REQ_SEQ_ERROR;
     }
     // S,C,W,A,M = 5 profiles, so 4 is max value
     if (cfg.default_profile > 4) {
@@ -271,10 +266,7 @@ kwp_result_t set_tcm_config(TCM_CORE_CONFIG cfg) {
         ESP_LOG_LEVEL(ESP_LOG_ERROR, "SET_TCM_CFG", "4Matic was requested, but TC ratio was 0");
         return NRC_SUB_FUNC_NOT_SUPPORTED_INVALID_FORMAT;
     }
-    sol_tcc->isr_disable();
-    vTaskDelay(5);
     esp_err_t res = EEPROM::save_core_config(&cfg);
-    sol_tcc->isr_enable();
     if (res == ESP_OK) {
         return 0x00; // OK!
     } else {
@@ -329,9 +321,12 @@ kwp_result_t get_module_settings(uint8_t module_id, uint16_t* buffer_len, uint8_
 }
 
 kwp_result_t set_module_settings(uint8_t module_id, uint16_t buffer_len, uint8_t* buffer) {
-    if (buffer_len == 1 && buffer[0] == 0x00) {
-        return ModuleConfiguration::reset_settings(module_id);
-    } else {
-        return ModuleConfiguration::write_settings(module_id, buffer_len, buffer);
-    }
+    if (!is_stationary_passive(egs_can_hal)) return NRC_CONDITIONS_NOT_CORRECT_REQ_SEQ_ERROR;
+    const esp_err_t e = buffer_len == 1 && buffer[0] == 0x00
+        ? ModuleConfiguration::reset_settings(module_id)
+        : ModuleConfiguration::write_settings(module_id, buffer_len, buffer);
+    if (e == ESP_OK) return NRC_OK;
+    if (e == ESP_ERR_INVALID_SIZE || e == ESP_ERR_INVALID_ARG) return NRC_SUB_FUNC_NOT_SUPPORTED_INVALID_FORMAT;
+    if (e == ESP_ERR_INVALID_STATE || e == ESP_ERR_TIMEOUT) return NRC_CONDITIONS_NOT_CORRECT_REQ_SEQ_ERROR;
+    return NRC_GENERAL_REJECT;
 }

@@ -9,6 +9,7 @@
 #include "nvs_flash.h"
 #include "esp_err.h"
 #include <string.h>
+#include "solenoids/flash_guard.h"
 
 static const char NVS_PARTITION_USER_CFG[16] = "tcm_user_config";
 
@@ -76,6 +77,16 @@ struct __attribute__ ((packed)) FLASH_NVS_SETTINGS_DESC {
 };
 
 namespace EEPROM {
+    class NvsHandle {
+    public:
+        explicit NvsHandle(nvs_open_mode_t mode = NVS_READONLY)
+            : error(nvs_open(NVS_PARTITION_USER_CFG, mode, &value)) {}
+        ~NvsHandle() { if (error == ESP_OK) nvs_close(value); }
+        NvsHandle(const NvsHandle&) = delete;
+        NvsHandle& operator=(const NvsHandle&) = delete;
+        nvs_handle_t value = 0;
+        esp_err_t error;
+    };
     esp_err_t init_eeprom(void);
     esp_err_t ewm_btn_get_saved_profile(uint8_t* dest);
     esp_err_t ewm_btn_save_profile(uint8_t save_profile);
@@ -84,7 +95,7 @@ namespace EEPROM {
     esp_err_t read_efuse_config(TCM_EFUSE_CONFIG* dest);
     esp_err_t write_efuse_config(TCM_EFUSE_CONFIG* dest);
 
-    uint16_t read_device_mode(void);
+    esp_err_t read_device_mode(uint16_t* mode);
     esp_err_t set_device_mode(uint16_t mode);
 
     esp_err_t read_nvs_map_data(const char* map_name, int16_t* dest, const int16_t* default_map, size_t map_element_count);
@@ -102,6 +113,5 @@ namespace EEPROM {
 #define NUM_GEARS 5
 extern TCM_CORE_CONFIG VEHICLE_CONFIG;
 extern TCM_EFUSE_CONFIG BOARD_CONFIG;
-extern nvs_handle_t MAP_NVS_HANDLE;
 
 #endif

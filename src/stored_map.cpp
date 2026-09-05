@@ -16,7 +16,9 @@ StoredMap::StoredMap(const char *eeprom_key_name,
                                                                 default_map,
                                                                 data_element_count)
 {
-    this->default_data = {0u};
+    this->data_name = eeprom_key_name;
+    this->data_element_count = data_element_count;
+    this->default_data = default_map;
     this->default_map = default_map;
     if ((x_size * y_size) == data_element_count)
     {
@@ -28,8 +30,6 @@ StoredMap::StoredMap(const char *eeprom_key_name,
                 if (this->add_data(dest, data_element_count))
                 {
                     // Everything OK!
-		            this->data_element_count = data_element_count;
-                    this->data_name = eeprom_key_name;
                     this->init_state = ESP_OK;
                 }
                 else
@@ -75,12 +75,13 @@ esp_err_t StoredMap::replace_data_content(const int16_t *new_data, uint16_t cont
 }
 
 esp_err_t StoredMap::reset_from_flash(void) {
-    esp_err_t res = ESP_OK;
-    const int16_t* default_data = this->default_map;
-    if (ESP_OK == this->replace_data_content(default_data, this->data_size()) ) {
-        res = this->save_to_eeprom();
-    }
-    return res;
+    if (this->init_state != ESP_OK) return this->init_state;
+    TccFlashGuard flash_guard;
+    if (flash_guard.status() != ESP_OK) return flash_guard.status();
+    esp_err_t e = EEPROM::write_nvs_map_data(this->data_name, this->default_map, this->data_element_count);
+    if (e == ESP_OK) e = this->replace_data_content(this->default_map, this->data_size());
+    const esp_err_t resumed = flash_guard.release();
+    return e == ESP_OK ? resumed : e;
 }
 
 /**
@@ -88,11 +89,14 @@ esp_err_t StoredMap::reset_from_flash(void) {
  */
 esp_err_t StoredMap::save_to_eeprom(void)
 {
+    if (this->init_state != ESP_OK) return this->init_state;
     return EEPROM::write_nvs_map_data(this->data_name, this->get_current_data(), this->data_element_count);
 }
 
 esp_err_t StoredMap::read_from_eeprom(const char *key_name, uint16_t expected_size)
 {
+    if (this->init_state != ESP_OK) return this->init_state;
+    if (expected_size != this->data_element_count) return ESP_ERR_INVALID_SIZE;
     esp_err_t ret;
     bool mem_is_allocated = this->is_allocated();
     if (mem_is_allocated)
@@ -101,7 +105,7 @@ esp_err_t StoredMap::read_from_eeprom(const char *key_name, uint16_t expected_si
         if (dest != nullptr)
         {
             ret = EEPROM::read_nvs_map_data(key_name, dest, this->default_map, expected_size);
-            if (ret != ESP_OK)
+            if (ret == ESP_OK)
             {
                 if(!this->add_data(dest, expected_size)) {
                     ret = ESP_ERR_INVALID_ARG;

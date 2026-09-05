@@ -369,6 +369,7 @@ class EgsBaseCan {
         }
 
         virtual void tx_frames(){};
+        void dispatch_received_frame(const twai_message_t& rx, uint32_t now);
         virtual void on_rx_frame(uint32_t id,  uint8_t dlc, uint64_t data, const uint32_t timestamp) {};
         virtual void on_rx_done(const uint32_t now_ts);
 

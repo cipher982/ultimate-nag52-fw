@@ -7,6 +7,7 @@ using namespace std;
 
 class LookupTable {
     public:
+        virtual ~LookupTable() = default;
         float get_value(float xValue);
         /// @brief This functions generates a corresponding header-value based on the parameter. This function does only work on tables with increasing x-values.
         /// @param xValue the value to be looked up

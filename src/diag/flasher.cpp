@@ -16,37 +16,32 @@ Flasher::Flasher(EgsBaseCan *can_ref, Gearbox* gearbox) {
 }
 
 Flasher::~Flasher() {
-    this->enable_tcc_isr();
-    this->gearbox_ref->diag_regain_control(); // Re-enable engine starting
+    finish_session();
 }
 
-void Flasher::disable_tcc_isr() {
-    if (!this->tcc_isr_disabled) {
-        sol_tcc->isr_disable();
-        this->tcc_isr_disabled = true;
+esp_err_t Flasher::finish_session() {
+    esp_err_t e = ESP_OK;
+    if (flash_guard.owns_lock()) e = flash_guard.release();
+    if (e != ESP_OK) {
+        ESP_LOGE("FLASHER", "TCC guard release failed: %s", esp_err_to_name(e));
+    }
+    data_dir = 0;
+    is_ota = false;
+    transfer_complete = false;
+    if (gearbox_ref != nullptr) gearbox_ref->diag_regain_control();
+    return e;
+}
+
+void Flasher::poll_safety() {
+    if ((flash_guard.owns_lock() || data_dir != 0) &&
+        (!is_stationary_passive(can_ref) || !is_engine_off(can_ref))) {
+        finish_session();
     }
 }
 
-void Flasher::enable_tcc_isr() {
-    if (this->tcc_isr_disabled) {
-        sol_tcc->isr_enable();
-        this->tcc_isr_disabled = false;
-    }
-}
-
-/**
- * "This is a function that handles a Request Download diagnostic message in a vehicle's 
- *  onboard diagnostic system. The function checks the current state of the vehicle's shifter 
- *  and engine, and then parses the request data to determine the destination memory address, 
- *  data format, and uncompressed memory size. If the request is valid, it prepares the vehicle 
- *  for data transfer by disabling the gearbox controller and setting the appropriate drive 
- *  profile and display gear. It also sets up a block counter to track the progress of the data 
- *  transfer. The function then returns a positive response message containing the maximum 
- *  number of data bytes that can be transferred in a single block." - ChatGPT
-*/
 void Flasher::on_request_download(const uint8_t* args, uint16_t arg_len, DiagMessage* dest, bool using_can) {
-    // Shifter must be Offline (SNV) or P or N
-    if (!is_shifter_passive(this->can_ref)) {
+    // Fresh P/N and known standstill are required, including on a bench.
+    if (!is_stationary_passive(this->can_ref)) {
         global_make_diag_neg_msg(dest, SID_REQ_DOWNLOAD, NRC_UN52_SHIFTER_ACTIVE);
         return;
     }
@@ -75,21 +70,22 @@ void Flasher::on_request_download(const uint8_t* args, uint16_t arg_len, DiagMes
         return;
     }
     //printf("Check3\n");
-    if (dest_mem_address+dest_mem_size > flash_size) {
+    if (dest_mem_size == 0 || dest_mem_address > flash_size || dest_mem_size > flash_size - dest_mem_address ||
+        (dest_mem_address % 4096) != 0) {
         global_make_diag_neg_msg(dest, SID_REQ_DOWNLOAD, NRC_GENERAL_REJECT);
         return;
     }
 
     // Must be 4096 byte sector aligned
     int erase_len = (dest_mem_size + 4096 - 1) & -4096;
-    // Disable TCC Slenoid since the ISR causes flash cache errors
-    this->disable_tcc_isr();
-    if (nullptr != ioexpander) {
-        ioexpander->diag_disable();
+    if (flash_guard.acquire() != ESP_OK) {
+        global_make_diag_neg_msg(dest, SID_REQ_DOWNLOAD, NRC_CONDITIONS_NOT_CORRECT_REQ_SEQ_ERROR);
+        return;
     }
-    vTaskDelay(20);
+    // Ownership remains with the KWP task through transfer/verification/timeout.
+    // Do not destroy the GPIO expander: it supplies live safety inputs.
     if (esp_flash_erase_region(esp_flash_default_chip, dest_mem_address, erase_len) != ESP_OK) {
-        this->enable_tcc_isr();
+        finish_session();
         global_make_diag_neg_msg(dest, SID_REQ_DOWNLOAD, NRC_GENERAL_REJECT);
         return;
     }
@@ -97,7 +93,11 @@ void Flasher::on_request_download(const uint8_t* args, uint16_t arg_len, DiagMes
     const esp_partition_t* part_info_for_ota = esp_ota_get_next_update_partition(nullptr);
     if (part_info_for_ota != nullptr && part_info_for_ota->address == dest_mem_address) {
         // Erase coredump for an OTA. This stops old coredumps from hanging around
-        esp_core_dump_image_erase();
+        if (esp_core_dump_image_erase() != ESP_OK) {
+            finish_session();
+            global_make_diag_neg_msg(dest, SID_REQ_DOWNLOAD, NRC_GENERAL_REJECT);
+            return;
+        }
     }
     //printf("Check6\n");
 
@@ -125,9 +125,9 @@ void Flasher::on_request_download(const uint8_t* args, uint16_t arg_len, DiagMes
 }
 
 void Flasher::on_request_upload(const uint8_t* args, uint16_t arg_len, DiagMessage* dest, bool using_can) {
-    // Shifter must be Offline (SNV) or P or N
-    if (!is_shifter_passive(this->can_ref)) {
-        return global_make_diag_neg_msg(dest, SID_REQ_DOWNLOAD, NRC_UN52_SHIFTER_ACTIVE);
+    // Upload also inhibits the controller, so requires positive safe inputs.
+    if (!is_stationary_passive(this->can_ref)) {
+        return global_make_diag_neg_msg(dest, SID_REQ_UPLOAD, NRC_UN52_SHIFTER_ACTIVE);
     }
     if (!is_engine_off(this->can_ref)) {
         return global_make_diag_neg_msg(dest, SID_REQ_DOWNLOAD, NRC_UN52_ENGINE_ON);
@@ -173,6 +173,7 @@ void Flasher::on_request_upload(const uint8_t* args, uint16_t arg_len, DiagMessa
 
 
 void Flasher::on_transfer_data(uint8_t* args, uint16_t arg_len, DiagMessage* dest, bool using_can) {
+    poll_safety();
     if (this->data_dir == DATA_DIR_DOWNLOAD) {
         // We use block sequence counter
         if (arg_len < 2) {
@@ -180,11 +181,16 @@ void Flasher::on_transfer_data(uint8_t* args, uint16_t arg_len, DiagMessage* des
             return;
         }
         if (args[0] == this->block_counter+1 || (args[0] == 0x00 && this->block_counter == 0xFF)) {
+            if (!flash_guard.owns_lock() || this->written_data > this->to_write ||
+                static_cast<uint32_t>(arg_len - 1) > this->to_write - this->written_data) {
+                finish_session();
+                global_make_diag_neg_msg(dest, SID_TRANSFER_DATA, NRC_CONDITIONS_NOT_CORRECT_REQ_SEQ_ERROR);
+                return;
+            }
             // Next block
             this->block_counter++;
             if (esp_flash_write(esp_flash_default_chip, (const void*)&args[1], this->start_addr + this->written_data, arg_len-1) != ESP_OK) {
-                this->data_dir = 0;
-                this->enable_tcc_isr();
+                finish_session();
                 global_make_diag_neg_msg(dest, SID_TRANSFER_DATA, NRC_UN52_OTA_WRITE_FAIL);
                 return;
             } else {
@@ -222,23 +228,38 @@ void Flasher::on_transfer_data(uint8_t* args, uint16_t arg_len, DiagMessage* des
 }
 
 void Flasher::on_transfer_exit(uint8_t* args, uint16_t arg_len, DiagMessage* dest) {
-    this->data_dir = 0; // Invalidate it
-    if (!this->is_ota) {
-        this->enable_tcc_isr();
+    poll_safety();
+    if (data_dir == 0 || (data_dir == DATA_DIR_DOWNLOAD && written_data != to_write)) {
+        finish_session();
+        global_make_diag_neg_msg(dest, SID_TRANSFER_EXIT, NRC_CONDITIONS_NOT_CORRECT_REQ_SEQ_ERROR);
+        return;
     }
-    // Return control back to TCM
-    if (nullptr != this->gearbox_ref) {
-        this->gearbox_ref->diag_regain_control();
+    transfer_complete = true;
+    data_dir = 0;
+    if (!is_ota && flash_guard.owns_lock() && finish_session() != ESP_OK) {
+        global_make_diag_neg_msg(dest, SID_TRANSFER_EXIT, NRC_GENERAL_REJECT);
+        return;
     }
-    global_make_diag_pos_msg(dest, SID_TRANSFER_EXIT, nullptr, 0x00);
+    if (!is_ota && gearbox_ref != nullptr) gearbox_ref->diag_regain_control();
+    global_make_diag_pos_msg(dest, SID_TRANSFER_EXIT, nullptr, 0);
 }
 
 void Flasher::on_request_verification(uint8_t* args, uint16_t arg_len, DiagMessage* dest) {
+    poll_safety();
+    if (!is_ota || !transfer_complete || !flash_guard.owns_lock()) {
+        global_make_diag_neg_msg(dest, SID_START_ROUTINE_BY_LOCAL_IDENT, NRC_CONDITIONS_NOT_CORRECT_REQ_SEQ_ERROR);
+        return;
+    }
     uint8_t res[2] = {0xE1, 0x00};
     if (this->is_ota) {
         // Only for OTA update
         esp_image_metadata_t data;
         const esp_partition_t* part = esp_ota_get_next_update_partition(NULL);
+        if (part == nullptr) {
+            finish_session();
+            global_make_diag_neg_msg(dest, SID_START_ROUTINE_BY_LOCAL_IDENT, NRC_GENERAL_REJECT);
+            return;
+        }
         const esp_partition_pos_t part_pos = {
             .offset = part->address,
             .size = part->size,
@@ -248,14 +269,14 @@ void Flasher::on_request_verification(uint8_t* args, uint16_t arg_len, DiagMessa
         if (e != ESP_OK) {
             res[1] = FLASH_CHECK_STATUS_INVALID;
             ESP_LOG_LEVEL(ESP_LOG_ERROR, "FLASHER", "Flash check failed! %s", esp_err_to_name(e));
-            this->enable_tcc_isr();
+            finish_session();
             return global_make_diag_pos_msg(dest, SID_START_ROUTINE_BY_LOCAL_IDENT, res, 2);
         }
         e = esp_ota_set_boot_partition(part);
         if (e != ESP_OK) {
             res[1] = FLASH_CHECK_STATUS_INVALID;
             ESP_LOG_LEVEL(ESP_LOG_ERROR, "FLASHER", "Set boot partition failed! %s", esp_err_to_name(e));
-            this->enable_tcc_isr();
+            finish_session();
             return global_make_diag_pos_msg(dest, SID_START_ROUTINE_BY_LOCAL_IDENT, res, 2);
         }
         res[1] = FLASH_CHECK_STATUS_OK;
@@ -263,6 +284,6 @@ void Flasher::on_request_verification(uint8_t* args, uint16_t arg_len, DiagMessa
     } else {
         res[1] = FLASH_CHECK_STATUS_OK;
     }
-    this->enable_tcc_isr();
+    if (finish_session() != ESP_OK) res[1] = FLASH_CHECK_STATUS_INVALID;
     return global_make_diag_pos_msg(dest, SID_START_ROUTINE_BY_LOCAL_IDENT, res, 2);
 }

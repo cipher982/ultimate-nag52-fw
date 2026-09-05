@@ -77,12 +77,14 @@ SPEAKER_POST_CODE setup_tcm()
                 {
                     if (ESP_OK == Solenoids::init_all_solenoids())
                     {
-                        // Read device mode!
-                        CURRENT_DEVICE_MODE = EEPROM::read_device_mode();
                         // Load EGS Calibration
                         if (ESP_OK == EGSCal::init_egs_calibration()) {
-                            // Read our configuration (This is allowed to fail as the default opts are always set by default)
-                            ModuleConfiguration::load_all_settings();
+                            // Load all missing settings before the TCC timer starts.
+                            esp_err_t settings_result = ModuleConfiguration::load_all_settings();
+                            if (settings_result != ESP_OK) {
+                                ESP_LOGE("INIT", "Module persistence failed: %s", esp_err_to_name(settings_result));
+                                return SPEAKER_POST_CODE::EEPROM_FAIL;
+                            }
                             // init driving profiles
                             Profiles::init_profiles(0 == VEHICLE_CONFIG.engine_type);
                             // Init GPIO Expander now we are done loading from flash
@@ -140,7 +142,7 @@ SPEAKER_POST_CODE setup_tcm()
                                 {
                                     
                                     gearbox = new Gearbox(shifter);
-                                    if (ESP_OK == gearbox->start_controller())
+                                    if (ESP_OK == sol_tcc->start_timer() && ESP_OK == gearbox->start_controller())
                                     {
                                         gearbox->set_profile(shifter->get_profile(50u));
                                     }
@@ -332,6 +334,7 @@ extern "C" void app_main(void)
     egs_can_hal = nullptr;
     pressure_manager = nullptr;
     SPEAKER_POST_CODE s = setup_tcm();
+    TccFlashGuard::end_boot(); // Also seal boot exemptions after failed setup.
     xTaskCreate(err_beep_loop, "PCSPKR", 1024, reinterpret_cast<void*>(s), 2, nullptr);
     
     // Now spin up the KWP2000 server (last thing)

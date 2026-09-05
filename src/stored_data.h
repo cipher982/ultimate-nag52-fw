@@ -5,6 +5,7 @@
 
 class StoredData {
 	public:
+        virtual ~StoredData() = default;
     	esp_err_t init_status(void);
 
         virtual esp_err_t read_from_eeprom(const char *key_name, uint16_t expected_size) = 0;
@@ -31,10 +32,10 @@ class StoredData {
         const char* get_data_name(void);
 
 	protected:
-        esp_err_t init_state;
-		const char* data_name;
-        uint16_t data_element_count;
-        const int16_t* default_data;
+        esp_err_t init_state = ESP_ERR_INVALID_STATE;
+        const char* data_name = nullptr;
+        uint16_t data_element_count = 0;
+        const int16_t* default_data = nullptr;
 };
 
 #endif // STORED_DATA_H

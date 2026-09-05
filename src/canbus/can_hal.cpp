@@ -122,8 +122,6 @@ bool EgsBaseCan::begin_task() {
 [[noreturn]]
 void EgsBaseCan::task_loop() {
     twai_message_t rx;
-    uint8_t i;
-    uint64_t tmp;
     uint32_t now;
     while(true) {
         now = GET_CLOCK_TIME();
@@ -139,37 +137,7 @@ void EgsBaseCan::task_loop() {
             for(uint8_t x = 0; x < f_count; x++) { // Read all frames
                 esp_err_t res = twai_receive(&rx, pdMS_TO_TICKS(0));
                 if (res == ESP_OK && rx.data_length_code != 0 && rx.rtr == 0) {
-                    if (CHECK_MODE_BIT_ENABLED(DEVICE_MODE_CANLOGGER)) {
-                        // Logging mode
-                        char buf[35];
-                        int pos = 0;
-                        pos += sprintf(buf + pos, "CF->0x%04X", (uint16_t)rx.identifier);
-                        for (uint8_t i = 0; i < rx.data_length_code; i++) {
-                            pos += sprintf(buf + pos, "%02X", rx.data[i]);
-                        }
-                        printf("%.*s\n", pos, buf);
-                    } else {
-                        if (this->diag_rx_id != 0 && rx.identifier == this->diag_rx_id) {
-                            // ISO-TP Diag endpoint
-                            if (this->diag_rx_queue != nullptr && rx.data_length_code == 8) {
-                                // Send the frame
-                                if (xQueueSend(*this->diag_rx_queue, rx.data, 0) != pdTRUE) {
-                                    ESP_LOG_LEVEL(ESP_LOG_ERROR, "EGS_BASIC_CAN","Discarded ISO-TP endpoint frame. Queue send failed");
-                                }
-                            }
-                        } else { // Normal message
-                            tmp = 0;
-                            for(i = 0; i < rx.data_length_code; i++) {
-                                tmp |= (uint64_t)rx.data[i] << (8*(7-i));
-                            }
-                            if (CHECK_MODE_BIT_ENABLED(DEVICE_MODE_SLAVE)) {
-                                // Slave mode handling
-                                this->egs_slave_mode_tester.import_frames(tmp, rx.identifier, now);
-                            } else {
-                                this->on_rx_frame(rx.identifier, rx.data_length_code, tmp, now);
-                            }
-                        }
-                    }
+                    this->dispatch_received_frame(rx, now);
                 }
             }
             // Message Tx

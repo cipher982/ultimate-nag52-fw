@@ -23,11 +23,17 @@ CRS_MODULE_SETTINGS CRS_CURRENT_SETTINGS = CRS_DEFAULT_SETTINGS;
 // Settings variable type: xxx_MODULE_SETTINGS
 // Settings SCN KEY IDs  : xxx_MODULE_SETTINGS_SCN_ID
 #define READ_EEPROM_SETTING(pfx) \
-    EEPROM::read_subsystem_settings<pfx##_MODULE_SETTINGS>(NVS_KEY_##pfx##_SETTINGS, &pfx##_CURRENT_SETTINGS, &pfx##_DEFAULT_SETTINGS)
+    do { \
+        esp_err_t e = EEPROM::read_subsystem_settings<pfx##_MODULE_SETTINGS>(NVS_KEY_##pfx##_SETTINGS, &pfx##_CURRENT_SETTINGS, &pfx##_DEFAULT_SETTINGS); \
+        if (e != ESP_OK && res == ESP_OK) res = e; \
+    } while (0)
 
 #define RESET_EEPROM_SETINGS(pfx) \
-        pfx##_CURRENT_SETTINGS = pfx##_DEFAULT_SETTINGS; \
-        return EEPROM::write_subsystem_settings(NVS_KEY_##pfx##_SETTINGS, &pfx##_DEFAULT_SETTINGS); \
+        { \
+            esp_err_t e = EEPROM::write_subsystem_settings(NVS_KEY_##pfx##_SETTINGS, &pfx##_DEFAULT_SETTINGS); \
+            if (e == ESP_OK) pfx##_CURRENT_SETTINGS = pfx##_DEFAULT_SETTINGS; \
+            return e; \
+        }
 
 // Checks and writes the buffer as the setting
 #define CHECK_AND_WRITE_SETTINGS(pfx, buffer_len, buffer) \
@@ -35,8 +41,9 @@ CRS_MODULE_SETTINGS CRS_CURRENT_SETTINGS = CRS_DEFAULT_SETTINGS;
         return ESP_ERR_INVALID_SIZE; \
     } else { \
         pfx##_MODULE_SETTINGS settings = *(reinterpret_cast<pfx##_MODULE_SETTINGS*>(buffer)); \
-        pfx##_CURRENT_SETTINGS = settings; \
-        return EEPROM::write_subsystem_settings(NVS_KEY_##pfx##_SETTINGS, &pfx##_CURRENT_SETTINGS); \
+        esp_err_t e = EEPROM::write_subsystem_settings(NVS_KEY_##pfx##_SETTINGS, &settings); \
+        if (e == ESP_OK) pfx##_CURRENT_SETTINGS = settings; \
+        return e; \
     } \
 
 #define READ_SETTINGS_TO_BUFFER(pfx, buffer_len_dest, buffer_dest, use_default) \

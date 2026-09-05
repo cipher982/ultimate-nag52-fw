@@ -239,6 +239,7 @@ void Kwp2000_server::response_timer_loop() {
 void Kwp2000_server::server_loop() {
     this->send_resp = false;
     while(1) {
+        if (flash_handler != nullptr) flash_handler->poll_safety();
         PerfMon::update_sample();
         uint32_t timestamp = GET_CLOCK_TIME();
         bool read_msg = false;
@@ -381,6 +382,10 @@ void Kwp2000_server::process_start_diag_session(const uint8_t* args, uint16_t ar
             // Not supported session mode!
             make_diag_neg_msg(SID_START_DIAGNOSTIC_SESSION, NRC_SUB_FUNC_NOT_SUPPORTED_INVALID_FORMAT);
             return;
+    }
+    if (this->session_mode != args[0] && this->flash_handler != nullptr) {
+        delete this->flash_handler;
+        this->flash_handler = nullptr;
     }
     this->session_mode = args[0];
     make_diag_pos_msg(SID_START_DIAGNOSTIC_SESSION, &args[0], 1);
@@ -835,6 +840,10 @@ void Kwp2000_server::process_ioctl_by_local_ident(uint8_t* args, uint16_t arg_le
         make_diag_neg_msg(SID_IOCTL_BY_LOCAL_IDENT, NRC_SERVICE_NOT_SUPPORTED_IN_ACTIVE_DIAG_SESSION);
         return;
     }
+    if (arg_len == 0) {
+        make_diag_neg_msg(SID_IOCTL_BY_LOCAL_IDENT, NRC_SUB_FUNC_NOT_SUPPORTED_INVALID_FORMAT);
+        return;
+    }
     if (args[0] == 0x10) { // Mode manipulation
 
         // NOTE. The device mode responses have been swapped to Big Endian byte order
@@ -842,11 +851,10 @@ void Kwp2000_server::process_ioctl_by_local_ident(uint8_t* args, uint16_t arg_le
         //       as the OEM TCU is a Big Endian processor, where this TCU is Little Endian
 
         if (arg_len == 2 && args[1] == 0x00) { // Return control back to ECU
-            CURRENT_DEVICE_MODE = DEVICE_MODE_NORMAL;
-            sol_tcc->isr_disable();
-            vTaskDelay(5);
-            EEPROM::set_device_mode(DEVICE_MODE_NORMAL);
-            sol_tcc->isr_enable();
+            if (change_device_mode(this->can_layer, DEVICE_MODE_NORMAL, true) != ESP_OK) {
+                make_diag_neg_msg(SID_IOCTL_BY_LOCAL_IDENT, NRC_CONDITIONS_NOT_CORRECT_REQ_SEQ_ERROR);
+                return;
+            }
             uint8_t resp[3] = {0x10, 0x00};
             make_diag_pos_msg(SID_IOCTL_BY_LOCAL_IDENT, resp, 2);
         } else if (arg_len == 2 && args[1] == 0x01) { // Report current device mode
@@ -854,16 +862,18 @@ void Kwp2000_server::process_ioctl_by_local_ident(uint8_t* args, uint16_t arg_le
             make_diag_pos_msg(SID_IOCTL_BY_LOCAL_IDENT, resp, 4);
         } else if (arg_len == 4 && args[1] == 0x07) { // Just change device mode
             uint16_t mode_req = (args[2] << 8) | args[3];
-            CURRENT_DEVICE_MODE = mode_req;
+            if (change_device_mode(this->can_layer, mode_req, false) != ESP_OK) {
+                make_diag_neg_msg(SID_IOCTL_BY_LOCAL_IDENT, NRC_CONDITIONS_NOT_CORRECT_REQ_SEQ_ERROR);
+                return;
+            }
             uint8_t resp[4] = {0x10, 0x07, (uint8_t)((CURRENT_DEVICE_MODE >> 8) & 0xFF), (uint8_t)(CURRENT_DEVICE_MODE & 0xFF)};
             make_diag_pos_msg(SID_IOCTL_BY_LOCAL_IDENT, resp, 4);
         } else if (arg_len == 4 && args[1] == 0x08) { // Change device mode and save to EEPROM!
             uint16_t mode_req = (args[2] << 8) | args[3];
-            CURRENT_DEVICE_MODE = mode_req;
-            sol_tcc->isr_disable();
-            vTaskDelay(5);
-            EEPROM::set_device_mode(mode_req);
-            sol_tcc->isr_enable();
+            if (change_device_mode(this->can_layer, mode_req, true) != ESP_OK) {
+                make_diag_neg_msg(SID_IOCTL_BY_LOCAL_IDENT, NRC_CONDITIONS_NOT_CORRECT_REQ_SEQ_ERROR);
+                return;
+            }
             uint8_t resp[4] = {0x10, 0x08, (uint8_t)((CURRENT_DEVICE_MODE >> 8) & 0xFF), (uint8_t)(CURRENT_DEVICE_MODE & 0xFF)};
             make_diag_pos_msg(SID_IOCTL_BY_LOCAL_IDENT, resp, 4);
         } else {
@@ -891,6 +901,10 @@ void Kwp2000_server::process_start_routine_by_local_ident(uint8_t* args, uint16_
 
     // EGS emulation
     if (args[0] == ROUTINE_EGS_ID_TCC_SOL_TOGGLE) {
+        if (!is_stationary_passive(this->can_layer)) {
+            make_diag_neg_msg(SID_START_ROUTINE_BY_LOCAL_IDENT, NRC_CONDITIONS_NOT_CORRECT_REQ_SEQ_ERROR);
+            return;
+        }
         // Should have 1 more byte
         if (arg_len != 2) {
             make_diag_neg_msg(SID_START_ROUTINE_BY_LOCAL_IDENT, NRC_SUB_FUNC_NOT_SUPPORTED_INVALID_FORMAT);
@@ -914,6 +928,7 @@ void Kwp2000_server::process_start_routine_by_local_ident(uint8_t* args, uint16_
             uint16_t voltage = TCUIO::battery_mv();
             uint16_t pll = TCUIO::parking_lock();
             if (
+                    is_stationary_passive(this->can_layer) &&
                     gearbox_ptr->sensor_data.engine_rpm == 0 && //Engine off
                     gearbox_ptr->sensor_data.input_rpm == 0 && // Not moving
 
@@ -1164,28 +1179,36 @@ void Kwp2000_server::process_write_mem_by_address(uint8_t* args, uint16_t arg_le
     uint8_t* src = &args[4];
     uint32_t end = start + len;
     if (start >= 0x800000 && end <= 0x87D000) {
+        TccFlashGuard flash_guard;
+        if (flash_guard.status() != ESP_OK) {
+            make_diag_neg_msg(SID_READ_MEM_BY_ADDRESS, NRC_CONDITIONS_NOT_CORRECT_REQ_SEQ_ERROR);
+            return;
+        }
         #define SECTOR_SIZE 4096
         int phys_address = 0x349000 + (start-0x800000);
         int sec_start_addr = (phys_address/SECTOR_SIZE)*SECTOR_SIZE;
         int offset_into_start_sector = phys_address - sec_start_addr;
         uint8_t* buffer = (uint8_t*)TCU_HEAP_ALLOC(SECTOR_SIZE);
-        esp_flash_read(NULL, buffer, sec_start_addr, SECTOR_SIZE);
+        if (buffer == nullptr || offset_into_start_sector + len > SECTOR_SIZE ||
+            esp_flash_read(NULL, buffer, sec_start_addr, SECTOR_SIZE) != ESP_OK) {
+            TCU_FREE(buffer);
+            make_diag_neg_msg(SID_READ_MEM_BY_ADDRESS, NRC_GENERAL_REJECT);
+            return;
+        }
         memcpy(&buffer[offset_into_start_sector], src, len);
-        sol_tcc->isr_disable();
-        vTaskDelay(5);
         esp_err_t erase_result = esp_flash_erase_region(NULL, sec_start_addr, SECTOR_SIZE);
         esp_err_t write_result = ESP_FAIL;
         if (ESP_OK == erase_result) {
             write_result = esp_flash_write(NULL, buffer, sec_start_addr, SECTOR_SIZE);
         }
-        sol_tcc->isr_enable();
+        if (flash_guard.release() != ESP_OK) write_result = ESP_FAIL;
         if (ESP_OK == write_result) {
             make_diag_pos_msg(SID_READ_MEM_BY_ADDRESS, nullptr, 0);
         } else {
             // Write failed
             make_diag_neg_msg(SID_READ_MEM_BY_ADDRESS, NRC_GENERAL_REJECT);
         }
-        delete[] buffer;
+        TCU_FREE(buffer);
     } else {
         uint32_t start_ptr = 0;
         // Address is somewhere in memory
@@ -1308,8 +1331,10 @@ void Kwp2000_server::run_solenoid_test() {
     res.lid = this->routine_id;
     int16_t temp = TCUIO::atf_temperature();
     uint8_t pll = TCUIO::parking_lock();
-    if (pll != 0 || INT16_MAX == temp) {
-        return; // Cannot function unless PLL is off
+    if (pll != 0 || INT16_MAX == temp || !is_stationary_passive(this->can_layer)) {
+        this->routine_running = false;
+        vTaskDelete(nullptr);
+        return;
     }
     res.atf_temp = temp;
     if (nullptr != this->gearbox_ptr) {
@@ -1325,9 +1350,15 @@ void Kwp2000_server::run_solenoid_test() {
     }
     // Now do on tests
     for (uint8_t i = 0; i < 6; i++) {
-        order[i]->pre_current_test();
+        if (order[i]->pre_current_test() != ESP_OK) {
+            memset(&res.on_readings[i], 0xFF, sizeof(SolenoidTestReading));
+            break;
+        }
         SolenoidTestReading t = order[i]->get_full_on_current_reading();
-        order[i]->post_current_test();
+        if (order[i]->post_current_test() != ESP_OK) {
+            memset(&res.on_readings[i], 0xFF, sizeof(SolenoidTestReading));
+            break;
+        }
         // place in result
         res.on_readings[i] = t;
     }

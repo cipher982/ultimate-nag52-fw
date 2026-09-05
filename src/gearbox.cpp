@@ -1165,23 +1165,15 @@ void Gearbox::controller_loop()
                         {
                             this->target_gear = GearboxGear::Park;
                             last_position = this->shifter_pos;
-                            sol_tcc->isr_disable();
-                            vTaskDelay(5);
-                            if (this->shift_adapter != nullptr)
-                            {
-                                this->shift_adapter->save();
+                            TccFlashGuard flash_guard;
+                            if (flash_guard.status() == ESP_OK) {
+                            if (this->shift_adapter != nullptr && this->shift_adapter->save() != ESP_OK) {
+                                ESP_LOGW("PARK SAVE", "Shift adaptation persistence failed");
                             }
-                            this->tcc->save();
-                            // Save profile
-                            //
-                            // This block writes NVS too (`ewm_btn_save_profile`
-                            // -> `nvs_set_u8`), so it must stay inside the ISR
-                            // guard. V13 released the guard immediately above
-                            // this line, leaving the one remaining flash write
-                            // on the Park-entry path unprotected -- the exact
-                            // path 687dfbc ("crashing when flashing and saving
-                            // maps in P") and 2409592 ("TCC ISR causing crashes
-                            // in save to NVS code") were written to make safe.
+                            if (this->tcc->save() != ESP_OK) {
+                                ESP_LOGW("PARK SAVE", "TCC map persistence failed");
+                            }
+                            // Keep all Park writes under the same task ownership.
                             if (ShifterStyle::EWM == shifter->get_shifter_type()) {
                                 if (ETS_CURRENT_SETTINGS.ewm_save_profile) {
                                     // We know that the profile is valid based on
@@ -1201,7 +1193,13 @@ void Gearbox::controller_loop()
                                     }
                                 }
                             }
-                            sol_tcc->isr_enable();
+                            const esp_err_t resumed = flash_guard.release();
+                            if (resumed != ESP_OK) {
+                                ESP_LOGE("PARK SAVE", "TCC timer resume failed: %s", esp_err_to_name(resumed));
+                            }
+                            } else {
+                                ESP_LOGW("PARK SAVE", "Persistence skipped: unsafe state or guard unavailable");
+                            }
                         }
                         else if (this->shifter_pos == ShifterPosition::N)
                         {

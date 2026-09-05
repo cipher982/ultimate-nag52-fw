@@ -35,13 +35,17 @@ class TorqueConverter {
         void update(GearboxGear curr_gear, GearboxGear targ_gear, PressureManager* pm,
             AbstractProfile* profile, SensorData* sensors, bool engine_speed_fresh);
         TccClutchStatus get_clutch_state(void);
-        void save() {
-            if (this->tcc_lock_map) {
-                this->tcc_lock_map->save_to_eeprom();
-            }
+        esp_err_t save() {
+            TccFlashGuard flash_guard;
+            if (flash_guard.status() != ESP_OK) return flash_guard.status();
+            esp_err_t result = ESP_OK;
+            if (this->tcc_lock_map) result = this->tcc_lock_map->save_to_eeprom();
             if (this->tcc_slip_map) {
-                this->tcc_slip_map->save_to_eeprom();
+                const esp_err_t e = this->tcc_slip_map->save_to_eeprom();
+                if (result == ESP_OK) result = e;
             }
+            const esp_err_t resumed = flash_guard.release();
+            return result == ESP_OK ? resumed : result;
         };
 
         void diag_toggle_tcc_sol(bool en);

@@ -7,42 +7,27 @@
 namespace EEPROM {
     template <typename T>
     esp_err_t read_subsystem_settings(const char* key_name, T* dest, const T* default_settings) {
+        NvsHandle handle;
+        if (handle.error != ESP_OK) return handle.error;
         size_t size = sizeof(T);
-        esp_err_t e = nvs_get_blob(MAP_NVS_HANDLE, key_name, dest, &size);
-        if (e == ESP_ERR_NVS_NOT_FOUND && key_name != nullptr) {
-            ESP_LOG_LEVEL(ESP_LOG_WARN, "EEPROM", "subsystem %s not found in NVS. Setting to settings from prog flash", key_name);
-            // Set default map data
-            e = write_subsystem_settings(key_name, default_settings);
-            memcpy(dest, default_settings, sizeof(T)); // As e would be ESP_OK, the memcpy below won't get executed!
+        esp_err_t e = nvs_get_blob(handle.value, key_name, dest, &size);
+        if (e == ESP_ERR_NVS_NOT_FOUND && default_settings != nullptr) {
+            memcpy(dest, default_settings, sizeof(T));
+            return write_subsystem_settings(key_name, default_settings);
         }
-        if(e != ESP_OK) {
-            if (default_settings != nullptr) {
-                memcpy(dest, default_settings, sizeof(T));
-                e = ESP_OK;
-            } else {
-                e = ESP_ERR_INVALID_ARG;
-            }
-        } else {
-            ESP_LOG_LEVEL(ESP_LOG_INFO, "EEPROM", "subsystem %s loaded OK from NVS!", key_name);
-        }
-        return e;
+        return e == ESP_OK && size != sizeof(T) ? ESP_ERR_INVALID_SIZE : e;
     }
 
     template <typename T>
     esp_err_t write_subsystem_settings(const char* key_name, const T* write) {
-        sol_tcc->isr_disable();
-        vTaskDelay(5);
-        esp_err_t e = nvs_set_blob(MAP_NVS_HANDLE, key_name, write, sizeof(T));
-        if (e != ESP_OK) {
-            ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "Error writing subsystem settings for %s (%s)", key_name, esp_err_to_name(e));
-        } else {
-            e = nvs_commit(MAP_NVS_HANDLE);
-            if (e != ESP_OK) {
-                ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "Error calling nvs_commit: %s", esp_err_to_name(e));
-            }
-        }
-        sol_tcc->isr_enable();
-        return e;
+        TccFlashGuard flash_guard;
+        if (flash_guard.status() != ESP_OK) return flash_guard.status();
+        NvsHandle handle(NVS_READWRITE);
+        if (handle.error != ESP_OK) return handle.error;
+        esp_err_t e = nvs_set_blob(handle.value, key_name, write, sizeof(T));
+        if (e == ESP_OK) e = nvs_commit(handle.value);
+        const esp_err_t resumed = flash_guard.release();
+        return e == ESP_OK ? resumed : e;
     }
 
 }

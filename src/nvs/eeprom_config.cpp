@@ -14,193 +14,133 @@
 uint16_t CURRENT_DEVICE_MODE = DEVICE_MODE_NORMAL;
 
 esp_err_t EEPROM::read_nvs_map_data(const char* map_name, int16_t* dest, const int16_t* default_map, size_t map_element_count) {
-    size_t byte_count = map_element_count*sizeof(int16_t);
-    esp_err_t e = nvs_get_blob(MAP_NVS_HANDLE, map_name, dest, &byte_count);
+    NvsHandle handle;
+    if (handle.error != ESP_OK) return handle.error;
+    const size_t expected = map_element_count * sizeof(int16_t);
+    size_t size = expected;
+    esp_err_t e = nvs_get_blob(handle.value, map_name, dest, &size);
     if (e == ESP_ERR_NVS_NOT_FOUND && default_map != nullptr) {
-        ESP_LOG_LEVEL(ESP_LOG_WARN, "EEPROM", "Map %s not found in NVS. Setting to default map from prog flash", map_name);
-        // Set default map data
-        e = write_nvs_map_data(map_name, default_map, map_element_count);
-        memcpy(dest, default_map, byte_count); // As e would be ESP_OK, the memcpy below won't get executed!
+        memcpy(dest, default_map, expected);
+        return write_nvs_map_data(map_name, default_map, map_element_count);
     }
-    if(e != ESP_OK) {
-        if (default_map != nullptr) {
-            memcpy(dest, default_map, byte_count);
-            e = ESP_OK;
-        } else {
-            e = ESP_ERR_INVALID_ARG;
-        }
-    } else {
-        ESP_LOG_LEVEL(ESP_LOG_INFO, "EEPROM", "Map %s loaded OK from NVS!", map_name);
-    }
-    return e;
+    return e == ESP_OK && size != expected ? ESP_ERR_INVALID_SIZE : e;
 }
 
 esp_err_t EEPROM::check_if_new_fw(bool* dest) {
-    esp_err_t res = ESP_OK;
+    TccFlashGuard flash_guard;
+    if (flash_guard.status() != ESP_OK) return flash_guard.status();
+    NvsHandle handle(NVS_READWRITE);
+    if (handle.error != ESP_OK) return handle.error;
     const esp_app_desc_t* now = esp_app_get_description();
     uint8_t sha[32];
-    size_t len = 32;
-    if (ESP_OK == nvs_get_blob(MAP_NVS_HANDLE, NVS_KEY_LAST_FW, &sha, &len)) {
-        // Check and compare
-        if (0 == memcmp(sha, now->app_elf_sha256, 32)) {
-            *dest = false;
-        } else {
-            // Different
-            nvs_set_blob(MAP_NVS_HANDLE, NVS_KEY_LAST_FW, now->app_elf_sha256, 32);
-            *dest = true;
-        }
-    } else {
-        res = nvs_set_blob(MAP_NVS_HANDLE, NVS_KEY_LAST_FW, now->app_elf_sha256, 32);
-        *dest = true;
+    size_t len = sizeof(sha);
+    esp_err_t e = nvs_get_blob(handle.value, NVS_KEY_LAST_FW, sha, &len);
+    if (e != ESP_OK && e != ESP_ERR_NVS_NOT_FOUND) return e;
+    *dest = e == ESP_ERR_NVS_NOT_FOUND || len != sizeof(sha) || memcmp(sha, now->app_elf_sha256, sizeof(sha)) != 0;
+    if (*dest) {
+        e = nvs_set_blob(handle.value, NVS_KEY_LAST_FW, now->app_elf_sha256, sizeof(sha));
+        if (e == ESP_OK) e = nvs_commit(handle.value);
     }
-    return res;
+    const esp_err_t resumed = flash_guard.release();
+    return e == ESP_OK ? resumed : e;
 }
 
 esp_err_t EEPROM::write_nvs_map_data(const char* map_name, const int16_t* to_write, size_t map_element_count) {
-    sol_tcc->isr_disable();
-    vTaskDelay(5);
-    esp_err_t e = nvs_set_blob(MAP_NVS_HANDLE, map_name, to_write, map_element_count*sizeof(int16_t));
-    if (e != ESP_OK) {
-        ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "Error setting value for %s (%s)", map_name, esp_err_to_name(e));
-    } else {
-        e = nvs_commit(MAP_NVS_HANDLE);
-        if (e != ESP_OK) {
-            ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "Error calling nvs_commit: %s", esp_err_to_name(e));
-        }
-    }
-    sol_tcc->isr_enable();
-    return e;
+    TccFlashGuard flash_guard;
+    if (flash_guard.status() != ESP_OK) return flash_guard.status();
+    NvsHandle handle(NVS_READWRITE);
+    if (handle.error != ESP_OK) return handle.error;
+    esp_err_t e = nvs_set_blob(handle.value, map_name, to_write, map_element_count * sizeof(int16_t));
+    if (e == ESP_OK) e = nvs_commit(handle.value);
+    const esp_err_t resumed = flash_guard.release();
+    return e == ESP_OK ? resumed : e;
 }
 
-uint16_t EEPROM::read_device_mode(void) {
-    uint16_t mode = 0;
-    esp_err_t e = nvs_get_u16(MAP_NVS_HANDLE, NVS_KEY_DEV_MODE, &mode);
-    if (ESP_OK != e) {
-        if (e == ESP_ERR_NVS_NOT_FOUND) {
-            mode |= DEVICE_MODE_NORMAL;
-            e = EEPROM::set_device_mode(mode);
-        } else {
-            ESP_LOGE("EEPROM", "Device mode get failed: %s, returning normal", esp_err_to_name(e));
-            mode |= DEVICE_MODE_NORMAL;
-        }
+esp_err_t EEPROM::read_device_mode(uint16_t* mode) {
+    NvsHandle handle;
+    if (handle.error != ESP_OK) return handle.error;
+    esp_err_t e = nvs_get_u16(handle.value, NVS_KEY_DEV_MODE, mode);
+    if (e == ESP_ERR_NVS_NOT_FOUND) {
+        *mode = DEVICE_MODE_NORMAL;
+        return set_device_mode(*mode);
     }
-    return mode;
+    return e;
 }
 
 esp_err_t EEPROM::set_device_mode(uint16_t mode) {
-    esp_err_t e = nvs_set_u16(MAP_NVS_HANDLE, NVS_KEY_DEV_MODE, mode);
-    if (ESP_OK != e) {
-        ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "Error setting device mode to %08X: %s", mode, esp_err_to_name(e));
-    } else {
-        e = nvs_commit(MAP_NVS_HANDLE);
-        if (e != ESP_OK) {
-            ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "Error calling nvs_commit: %s", esp_err_to_name(e));
-        }
-    }
-    return e;
+    TccFlashGuard flash_guard;
+    if (flash_guard.status() != ESP_OK) return flash_guard.status();
+    NvsHandle handle(NVS_READWRITE);
+    if (handle.error != ESP_OK) return handle.error;
+    esp_err_t e = nvs_set_u16(handle.value, NVS_KEY_DEV_MODE, mode);
+    if (e == ESP_OK) e = nvs_commit(handle.value);
+    const esp_err_t resumed = flash_guard.release();
+    return e == ESP_OK ? resumed : e;
 }
 
-// bool read_nvs_gear_adaptation(nvs_handle_t handle, const char* key, pressure_map* map, size_t store_size) {
-//     esp_err_t e = nvs_get_blob(handle, key, map, &store_size);
-//     if (e == ESP_ERR_NVS_NOT_FOUND) {
-//         ESP_LOG_LEVEL(ESP_LOG_WARN, "EEPROM", "Adaptation %s map not found. Creating a new one", key);
-//         pressure_map new_map = {0,0,0,0,0,0,0,0,0,0,0};
-//         e = nvs_set_blob(handle, key, &new_map, sizeof(new_map));
-//         if (e != ESP_OK) {
-//             ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "Error initializing default adaptation map map data (%s)", esp_err_to_name(e));
-//             return false;
-//         }
-//         e = nvs_commit(handle);
-//         if (e != ESP_OK) {
-//             ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "Error calling nvs_commit: %s", esp_err_to_name(e));
-//             return false;
-//         }
-//         ESP_LOG_LEVEL(ESP_LOG_INFO, "EEPROM", "New TCC map creation OK!");
-//         memcpy(map, new_map, sizeof(new_map));
-//         return true;
-//     }
-//     return (e == ESP_OK);
-// }
 
 esp_err_t EEPROM::init_eeprom() {
-    // Called on startup
-    esp_err_t result = nvs_flash_init();
-    if (result == ESP_ERR_NVS_NO_FREE_PAGES || result == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "EEPROM init failed! %s", esp_err_to_name(result));
-    } else {
-        // Flash init OK
-        nvs_handle_t config_handle;    
-        result = nvs_open(NVS_PARTITION_USER_CFG, NVS_READWRITE, &config_handle);
-        if (result != ESP_OK) {
-            ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "EEPROM NVS handle failed! %s", esp_err_to_name(result));
-        }
-        MAP_NVS_HANDLE = config_handle;
-        bool new_fw = false;
-        if (ESP_OK == EEPROM::check_if_new_fw(&new_fw)) {
-            if (new_fw) {
-                nvs_iterator_t it = NULL;
-                esp_err_t res = nvs_entry_find("nvs", NULL, NVS_TYPE_ANY, &it);
-                while (ESP_OK == res) {
-                    nvs_entry_info_t info;
-                    nvs_entry_info(it, &info);
-                    res = nvs_entry_next(&it);
-                    bool found = false;
-                    for (int i = 0; i < ALL_NVS_KEYS_LEN; i++) {
-                        if (0 == strcmp(*ALL_NVS_KEYS[i], info.key)) {
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found) {
-                        ESP_LOGI("EEPROM", "Deleting NVS key %s\n", info.key);
-                        nvs_erase_key(config_handle, info.key);
-                    }
-                }
-                nvs_release_iterator(it);
-                nvs_commit(config_handle);
-                FLASH_NVS_SETTINGS_DESC desc = {};
-                if (ESP_OK == esp_flash_read(esp_flash_default_chip, &desc, 0x330000, sizeof(FLASH_NVS_SETTINGS_DESC))) {
-                    if (
-                        desc.magic[0] == 0xDE &&
-                        desc.magic[1] == 0xAD &&
-                        desc.magic[2] == 0xBE &&
-                        desc.magic[3] == 0xEF
-                    ) {
-                        // Valid data stored, check cs
-                        // Also check flashed NVS config settings partition
-                        uint32_t key_cs = 0;
-                        for (int i = 0; i < ALL_NVS_KEYS_LEN; i++) {
-                            const char* key = *ALL_NVS_KEYS[i];
-                            int len = strlen(key);
-                            for (int l = 0; l < len; l++) {
-                                key_cs += l;
-                                key_cs += key[l];
-                            }
-                        }
-                        ESP_LOGI("EEPROM", "NVS CONFIG FLASH CHECK. CS OF KEYS: 0x%08X. CS OF FLASH: 0x%08X", (int)key_cs, (int)desc.key_cs);
-                        if (key_cs != desc.key_cs) {
-                            // Just erase 1 sector (Min), this way we avoid loads of writes, and config app will still be alerted
-                            esp_flash_erase_region(esp_flash_default_chip, 0x330000, 4096);
-                            ESP_LOGI("EEPROM", "Flash config desc erased");
-                        } else {
-                            ESP_LOGI("EEPROM", "NVS Flash config desc OK!");
-                        }
-                    } else {
-                        ESP_LOGI("EEPROM", "No NVS Config data found");
-                    }
+    TccFlashGuard flash_guard;
+    if (flash_guard.status() != ESP_OK) return flash_guard.status();
+    esp_err_t e = nvs_flash_init();
+    if (e != ESP_OK) return e; // Never erase user configuration to recover init.
+    NvsHandle handle(NVS_READWRITE);
+    if (handle.error != ESP_OK) return handle.error;
+    bool new_fw = false;
+    e = check_if_new_fw(&new_fw);
+    if (e != ESP_OK) return e;
+    if (new_fw) {
+        nvs_iterator_t it = nullptr;
+        esp_err_t iter = nvs_entry_find("nvs", NVS_PARTITION_USER_CFG, NVS_TYPE_ANY, &it);
+        while (iter == ESP_OK) {
+            nvs_entry_info_t info;
+            e = nvs_entry_info(it, &info);
+            if (e != ESP_OK) break;
+            iter = nvs_entry_next(&it);
+            bool found = false;
+            for (int i = 0; i < ALL_NVS_KEYS_LEN; ++i) {
+                if (strcmp(*ALL_NVS_KEYS[i], info.key) == 0) {
+                    found = true;
+                    break;
                 }
             }
+            if (!found) {
+                e = nvs_erase_key(handle.value, info.key);
+                if (e != ESP_OK) break;
+            }
         }
-        result = read_core_config(&VEHICLE_CONFIG);
+        nvs_release_iterator(it);
+        if (e != ESP_OK) return e;
+        if (iter != ESP_ERR_NVS_NOT_FOUND) return iter;
+        e = nvs_commit(handle.value);
+        if (e != ESP_OK) return e;
+        FLASH_NVS_SETTINGS_DESC desc = {};
+        e = esp_flash_read(esp_flash_default_chip, &desc, 0x330000, sizeof(desc));
+        if (e != ESP_OK) return e;
+        if (desc.magic[0] == 0xDE && desc.magic[1] == 0xAD && desc.magic[2] == 0xBE && desc.magic[3] == 0xEF) {
+            uint32_t key_cs = 0;
+            for (int i = 0; i < ALL_NVS_KEYS_LEN; ++i) {
+                const char* key = *ALL_NVS_KEYS[i];
+                const size_t len = strlen(key);
+                for (size_t l = 0; l < len; ++l) key_cs += l + key[l];
+            }
+            if (key_cs != desc.key_cs) {
+                e = esp_flash_erase_region(esp_flash_default_chip, 0x330000, 4096);
+                if (e != ESP_OK) return e;
+            }
+        }
     }
-    return result;
+    e = read_core_config(&VEHICLE_CONFIG);
+    if (e == ESP_OK) e = read_device_mode(&CURRENT_DEVICE_MODE);
+    const esp_err_t resumed = flash_guard.release();
+    return e == ESP_OK ? resumed : e;
 }
 
 esp_err_t EEPROM::read_core_config(TCM_CORE_CONFIG* dest) {
-    nvs_handle_t handle;
-    nvs_open(NVS_PARTITION_USER_CFG, NVS_READWRITE, &handle); // Must succeed as we have already opened it!
+    NvsHandle handle;
+    if (handle.error != ESP_OK) return handle.error;
     size_t s = sizeof(TCM_CORE_CONFIG);
-    esp_err_t result = nvs_get_blob(handle, NVS_KEY_CORE_SCN, dest, &s);
+    esp_err_t result = nvs_get_blob(handle.value, NVS_KEY_CORE_SCN, dest, &s);
     if (result == ESP_ERR_NVS_NOT_FOUND) {
         ESP_LOG_LEVEL(ESP_LOG_WARN, "EEPROM", "SCN Config not found. Creating a new one");
         TCM_CORE_CONFIG c = {
@@ -225,55 +165,39 @@ esp_err_t EEPROM::read_core_config(TCM_CORE_CONFIG* dest) {
             .engine_drag_torque = 400, // 40Nm
             .jeep_chrysler = false
         };
-        result = nvs_set_blob(handle, NVS_KEY_CORE_SCN, &c, sizeof(c));
-        if (result != ESP_OK) {
-            ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "Error initializing default SCN config (%s)", esp_err_to_name(result));
-        } else {
-            // set blob OK
-            result = nvs_commit(handle);
-            if (result != ESP_OK) {
-                ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "Error calling nvs_commit: %s", esp_err_to_name(result));
-            } else {
-                ESP_LOG_LEVEL(ESP_LOG_INFO, "EEPROM", "New SCN  creation OK!");
-                memcpy(dest, &s, sizeof(s));
-                result = ESP_OK;
-            }
-        }
-        return true;
+        result = save_core_config(&c);
+        if (result == ESP_OK) *dest = c;
+        return result;
     }
-    return result;
+    return result == ESP_OK && s != sizeof(*dest) ? ESP_ERR_INVALID_SIZE : result;
 }
 
 esp_err_t EEPROM::save_core_config(TCM_CORE_CONFIG* write) {
-    nvs_handle_t handle;
-    esp_err_t e;
-    size_t s = sizeof(TCM_CORE_CONFIG);
-    sol_tcc->isr_disable();
-    vTaskDelay(5);
-    nvs_open(NVS_PARTITION_USER_CFG, NVS_READWRITE, &handle); // Must succeed as we have already opened it!
-    e = nvs_set_blob(handle, NVS_KEY_CORE_SCN, write, s);
-    if (e != ESP_OK) {
-        ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "Error Saving SCN config (%s)", esp_err_to_name(e));
-    } else {
-        e = nvs_commit(handle);
-        if (e != ESP_OK) {
-            ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "Error calling nvs_commit: %s", esp_err_to_name(e));
-        }
-    }
-    sol_tcc->isr_enable();
-    return e;
+    TccFlashGuard flash_guard;
+    if (flash_guard.status() != ESP_OK) return flash_guard.status();
+    NvsHandle handle(NVS_READWRITE);
+    if (handle.error != ESP_OK) return handle.error;
+    esp_err_t e = nvs_set_blob(handle.value, NVS_KEY_CORE_SCN, write, sizeof(*write));
+    if (e == ESP_OK) e = nvs_commit(handle.value);
+    const esp_err_t resumed = flash_guard.release();
+    return e == ESP_OK ? resumed : e;
 }
 
 esp_err_t EEPROM::ewm_btn_get_saved_profile(uint8_t* dest) {
-    nvs_handle_t handle;
-    nvs_open(NVS_PARTITION_USER_CFG, NVS_READWRITE, &handle); // Must succeed as we have already opened it!
-    return nvs_get_u8(handle, NVS_KEY_LAST_PROFILE, dest);
+    NvsHandle handle;
+    if (handle.error != ESP_OK) return handle.error;
+    return nvs_get_u8(handle.value, NVS_KEY_LAST_PROFILE, dest);
 }
 
 esp_err_t EEPROM::ewm_btn_save_profile(uint8_t save_profile) {
-    nvs_handle_t handle;
-    nvs_open(NVS_PARTITION_USER_CFG, NVS_READWRITE, &handle); // Must succeed as we have already opened it!
-    return nvs_set_u8(handle, NVS_KEY_LAST_PROFILE, save_profile);
+    TccFlashGuard flash_guard;
+    if (flash_guard.status() != ESP_OK) return flash_guard.status();
+    NvsHandle handle(NVS_READWRITE);
+    if (handle.error != ESP_OK) return handle.error;
+    esp_err_t e = nvs_set_u8(handle.value, NVS_KEY_LAST_PROFILE, save_profile);
+    if (e == ESP_OK) e = nvs_commit(handle.value);
+    const esp_err_t resumed = flash_guard.release();
+    return e == ESP_OK ? resumed : e;
 }
 
 esp_err_t EEPROM::read_efuse_config(TCM_EFUSE_CONFIG* dest) {
@@ -328,4 +252,3 @@ esp_err_t EEPROM::write_efuse_config(TCM_EFUSE_CONFIG* dest) {
 
 TCM_CORE_CONFIG VEHICLE_CONFIG = {};
 TCM_EFUSE_CONFIG BOARD_CONFIG = {};
-nvs_handle_t MAP_NVS_HANDLE = {};

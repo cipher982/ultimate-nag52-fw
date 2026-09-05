@@ -90,8 +90,8 @@ public:
     // Internal functions - Don't touch, handled by I2S thread!
     void __set_adc_reading(uint16_t c);
 
-    virtual void pre_current_test(void){};
-    virtual void post_current_test(void){};
+    virtual esp_err_t pre_current_test(void){ return ESP_OK; };
+    virtual esp_err_t post_current_test(void){ return ESP_OK; };
     SolenoidTestReading get_full_on_current_reading(void);
 
     // -- These functions are only accessed by sw_fader class! -- //

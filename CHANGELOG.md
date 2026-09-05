@@ -4,6 +4,19 @@ This firmware contains initial EGS52 calibration data. You will need to select t
 `TCU Program settings -> CAL`
 You can see [here](https://docs.ultimate-nag52.net/en/gettingstarted/configuration/calibration) for an explination on calibration settings
 
+# Unreleased — persistence safety
+
+* Serialize complete TCC-protected persistence operations and OTA sessions with
+  task ownership, bounded callback exclusion, checked timer transitions and
+  error-path cleanup; defer timer startup until boot defaults are loaded.
+* Close checked NVS handles on every path, commit profile saves and propagate
+  persistence errors. Preserve read-only reset-reason telemetry.
+* Require positive passive/stationary diagnostic conditions before device-mode,
+  persistence or TCC output changes. Keep synchronous, internal-RAM I2C safety
+  inputs alive through OTA rather than destroying their bus.
+* Scan direct flash sinks in headers/implementations; add scoped host regressions.
+  See README for the mandatory bench gate; no tuning/calibration changes.
+
 # 08/06/26
 
 ## Added
