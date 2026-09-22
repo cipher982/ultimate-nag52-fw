@@ -104,7 +104,11 @@ struct Policy {
                 G55RoadResponsePolicy::kD5UpshiftMarginRpm;
     }
 
-    // Which of the two constraints holds the upshift back at this point?
+    // Which constraint is holding the upshift back *here*? Ask at the limiting
+    // point, not at the last admitted one: at the last admitted pedal both
+    // constraints pass by construction, so reading "which failed" there always
+    // answers "neither" and hides the real limiter. Evaluate one pedal step above
+    // the boundary instead, which is where the decision actually flips.
     const char* binding(int output_rpm, int pedal_raw, int torque_nm) const {
         const bool map_ok = output_rpm * kRatio4x1000 / 1000 > map45(pedal_raw);
         const bool gate_ok = gate_allows(output_rpm, pedal_raw, torque_nm);
@@ -214,7 +218,8 @@ int main() {
             if (shipped().admits_upshift(out, pedal, 300)) { lift = pedal; }
         }
         if (lift < 0) { std::printf("  %3d | 4->5 not permitted at any pedal\n", mph); continue; }
-        const char* why = shipped().binding(out, lift, 300);
+        // one pedal step ABOVE the boundary is where the decision flips
+        const char* why = shipped().binding(out, lift + 1, 300);
         std::printf("  %3d | lift<=%3d raw, last admitted pedal limited by: %s\n", mph, lift, why);
         (void)seen;
     }
