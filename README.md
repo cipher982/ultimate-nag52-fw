@@ -26,6 +26,16 @@ This project contains code built from the ground up, or code based on black-box 
 3. Run `doxygen`
 4. View code documentation in the generated `html` folder
 
+## EGS52 torque availability
+
+`MS_312.M_STA/M_MIN/M_MAX` and `MS_212.M_ESPV` are 13-bit values. Their
+all-ones `0x1FFF` encoding means unavailable; it must remain `INT16_MAX`
+in `CanTorqueData`, not be converted into 1547 Nm. The EGS52 receiver
+uses `src/canbus/egs52_torque.h` for these four fields; the off-vehicle
+regression runs with `uv run --no-project python test/test_egs52_torque_host.py`.
+This source correction does not demonstrate an in-car symptom or qualify
+a firmware image for flashing.
+
 ## Persistence safety qualification
 
 Desk changes are not loaded-hardware qualification. Before flashing or vehicle
