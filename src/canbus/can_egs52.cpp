@@ -1,4 +1,5 @@
 #include "can_egs52.h"
+#include "egs52_torque.h"
 #include "driver/twai.h"
 #include "board_config.h"
 #include "nvs/eeprom_config.h"
@@ -176,12 +177,12 @@ CanTorqueData Egs52Can::get_torque_data(const uint32_t expire_time_ms) {
     MS_210_EGS52 ms210;
     CanTorqueData ret = TORQUE_NDEF;
     if (this->ecu_ms.get_MS_312(GET_CLOCK_TIME(), expire_time_ms, &ms312)) {
-        if (UINT16_MAX != ms312.M_STA) {ret.m_converted_static = ((int16_t)ms312.M_STA / 4) - 500;}
-        if (UINT16_MAX != ms312.M_MIN) {ret.m_min = ((int16_t)ms312.M_MIN / 4) - 500;}
-        if (UINT16_MAX != ms312.M_MAX) {ret.m_max = ((int16_t)ms312.M_MAX / 4) - 500;}
+        ret.m_converted_static = decode_egs52_torque(ms312.M_STA);
+        ret.m_min = decode_egs52_torque(ms312.M_MIN);
+        ret.m_max = decode_egs52_torque(ms312.M_MAX);
     }
     if (this->ecu_ms.get_MS_212(GET_CLOCK_TIME(), expire_time_ms, &ms212)) {
-        if (UINT16_MAX != ms212.M_ESPV) {ret.m_converted_driver = ((int16_t)ms212.M_ESPV / 4) - 500;}
+        ret.m_converted_driver = decode_egs52_torque(ms212.M_ESPV);
     }
     if (INT16_MAX != ret.m_max) {
         // Get factor to correct it by
