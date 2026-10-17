@@ -37,6 +37,7 @@
 #define RLI_CURR_SW_PART_INFO   0x2A // Current FW size and address
 #define RLI_NEXT_SW_PART_INFO   0x2B // Current FW size and address
 #define RLI_EMBED_FILE_INFO     0x2C // location and len of EMBED.ZIP
+#define RLI_SHIFT_DIAGNOSTIC    0x2E // Atomic V10 shift/TCC diagnostic snapshot
 #define RLI_BOOT_INFO           0x2F // Why the TCU last restarted, and uptime
 
 #define RLI_CLUTCH_SPEEDS   0x30
@@ -185,6 +186,11 @@ typedef struct {
     int16_t acceleration_input;
 } __attribute__ ((packed)) DRIVING_DYNAMIC_INFO;
 
+typedef ShiftDiagnosticSnapshot DATA_SHIFT_DIAGNOSTIC;
+
+static_assert(sizeof(DATA_SHIFT_DIAGNOSTIC) == 63,
+    "DATA_SHIFT_DIAGNOSTIC wire size changed");
+
 DATA_GEARBOX_SENSORS get_gearbox_sensors(Gearbox* g);
 DATA_SOLENOIDS get_solenoid_data(Gearbox* gb_ptr);
 DATA_PRESSURES get_pressure_data(Gearbox* gb_ptr);
@@ -192,6 +198,7 @@ DATA_CANBUS_RX get_rx_can_data(EgsBaseCan* can_layer, Shifter* shifter);
 DATA_SYS_USAGE get_sys_usage(void);
 SHIFT_LIVE_INFO get_shift_live_Data(const EgsBaseCan* can_layer, Gearbox* g);
 DATA_TCC_PROGRAM get_tcc_program_data(Gearbox* gb_ptr);
+DATA_SHIFT_DIAGNOSTIC get_shift_diagnostic_data(Gearbox* gb_ptr);
 
 // Read and write TCU Module settings
 

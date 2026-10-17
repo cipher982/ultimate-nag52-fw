@@ -114,6 +114,13 @@ DATA_TCC_PROGRAM get_tcc_program_data(Gearbox* gb_ptr) {
     return ret;
 }
 
+DATA_SHIFT_DIAGNOSTIC get_shift_diagnostic_data(Gearbox* gb_ptr) {
+    if (gb_ptr == nullptr) {
+        return DATA_SHIFT_DIAGNOSTIC{};
+    }
+    return gb_ptr->diag_get_shift_diagnostic();
+}
+
 DATA_CANBUS_RX get_rx_can_data(EgsBaseCan* can_layer, Shifter* shifter) {
     DATA_CANBUS_RX ret = {};
     if (can_layer == nullptr || gearbox == nullptr) {

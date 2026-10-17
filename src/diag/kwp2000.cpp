@@ -596,6 +596,10 @@ void Kwp2000_server::process_read_data_local_ident(uint8_t* args, uint16_t arg_l
     } else if (args[0] == RLI_PRESSURES) {
         DATA_PRESSURES r = get_pressure_data(this->gearbox_ptr);
         make_diag_pos_msg(SID_READ_DATA_LOCAL_IDENT, RLI_PRESSURES, (uint8_t*)&r, sizeof(DATA_PRESSURES));
+    } else if (args[0] == RLI_SHIFT_DIAGNOSTIC) {
+        DATA_SHIFT_DIAGNOSTIC r = get_shift_diagnostic_data(this->gearbox_ptr);
+        make_diag_pos_msg(SID_READ_DATA_LOCAL_IDENT, RLI_SHIFT_DIAGNOSTIC,
+            (uint8_t*)&r, sizeof(DATA_SHIFT_DIAGNOSTIC));
     } else if (args[0] == RLI_BOOT_INFO) {
         // Read-only, no side effects, no flash access: safe to ask at any time,
         // including immediately after an unexplained restart.
