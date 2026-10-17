@@ -64,6 +64,10 @@ esp_err_t EEPROM::check_if_new_fw(bool* dest) {
 }
 
 esp_err_t EEPROM::write_nvs_map_data(const char* map_name, const int16_t* to_write, size_t map_element_count) {
+    if (nullptr != sol_tcc) {
+        sol_tcc->isr_disable();
+        vTaskDelay(5);
+    }
     esp_err_t e = nvs_set_blob(MAP_NVS_HANDLE, map_name, to_write, map_element_count*sizeof(int16_t));
     if (e != ESP_OK) {
         ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "Error setting value for %s (%s)", map_name, esp_err_to_name(e));
@@ -72,6 +76,9 @@ esp_err_t EEPROM::write_nvs_map_data(const char* map_name, const int16_t* to_wri
         if (e != ESP_OK) {
             ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "Error calling nvs_commit: %s", esp_err_to_name(e));
         }
+    }
+    if (nullptr != sol_tcc) {
+        sol_tcc->isr_enable();
     }
     return e;
 }
@@ -92,6 +99,10 @@ uint16_t EEPROM::read_device_mode(void) {
 }
 
 esp_err_t EEPROM::set_device_mode(uint16_t mode) {
+    if (nullptr != sol_tcc) {
+        sol_tcc->isr_disable();
+        vTaskDelay(5);
+    }
     esp_err_t e = nvs_set_u16(MAP_NVS_HANDLE, NVS_KEY_DEV_MODE, mode);
     if (ESP_OK != e) {
         ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "Error setting device mode to %08X: %s", mode, esp_err_to_name(e));
@@ -100,6 +111,9 @@ esp_err_t EEPROM::set_device_mode(uint16_t mode) {
         if (e != ESP_OK) {
             ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "Error calling nvs_commit: %s", esp_err_to_name(e));
         }
+    }
+    if (nullptr != sol_tcc) {
+        sol_tcc->isr_enable();
     }
     return e;
 }
@@ -149,8 +163,17 @@ esp_err_t EEPROM::init_eeprom() {
                     nvs_entry_info(it, &info);
                     res = nvs_entry_next(&it);
                     bool found = false;
+                    static const char* const LEGACY_ROLLBACK_KEYS[] = {
+                        "TCC_AB", "GAR_A3", "TCC_S_ADAPT_3", "TCC_L_ADAPT_3", "ADP_FR_A2", "ADP_AP_A2"
+                    };
                     for (int i = 0; i < ALL_NVS_KEYS_LEN; i++) {
                         if (0 == strcmp(*ALL_NVS_KEYS[i], info.key)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    for (size_t i = 0; !found && i < sizeof(LEGACY_ROLLBACK_KEYS) / sizeof(LEGACY_ROLLBACK_KEYS[0]); i++) {
+                        if (0 == strcmp(LEGACY_ROLLBACK_KEYS[i], info.key)) {
                             found = true;
                             break;
                         }
@@ -249,37 +272,42 @@ esp_err_t EEPROM::read_core_config(TCM_CORE_CONFIG* dest) {
 }
 
 esp_err_t EEPROM::save_core_config(TCM_CORE_CONFIG* write) {
-    nvs_handle_t handle;
     esp_err_t e;
     size_t s = sizeof(TCM_CORE_CONFIG);
-    sol_tcc->isr_disable();
-    vTaskDelay(5);
-    nvs_open(NVS_PARTITION_USER_CFG, NVS_READWRITE, &handle); // Must succeed as we have already opened it!
-    e = nvs_set_blob(handle, NVS_KEY_CORE_SCN, write, s);
+    if (nullptr != sol_tcc) {
+        sol_tcc->isr_disable();
+        vTaskDelay(5);
+    }
+    e = nvs_set_blob(MAP_NVS_HANDLE, NVS_KEY_CORE_SCN, write, s);
     if (e != ESP_OK) {
         ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "Error Saving SCN config (%s)", esp_err_to_name(e));
     } else {
-        e = nvs_commit(handle);
+        e = nvs_commit(MAP_NVS_HANDLE);
         if (e != ESP_OK) {
             ESP_LOG_LEVEL(ESP_LOG_ERROR, "EEPROM", "Error calling nvs_commit: %s", esp_err_to_name(e));
         }
     }
-    sol_tcc->isr_enable();
+    if (nullptr != sol_tcc) {
+        sol_tcc->isr_enable();
+    }
     return e;
 }
 
 esp_err_t EEPROM::ewm_btn_get_saved_profile(uint8_t* dest) {
-    nvs_handle_t handle;
-    nvs_open(NVS_PARTITION_USER_CFG, NVS_READWRITE, &handle); // Must succeed as we have already opened it!
-    return nvs_get_u8(handle, NVS_KEY_LAST_PROFILE, dest);
+    return nvs_get_u8(MAP_NVS_HANDLE, NVS_KEY_LAST_PROFILE, dest);
 }
 
 esp_err_t EEPROM::ewm_btn_save_profile(uint8_t save_profile) {
-    nvs_handle_t handle;
-    nvs_open(NVS_PARTITION_USER_CFG, NVS_READWRITE, &handle); // Must succeed as we have already opened it!
-    esp_err_t e = nvs_set_u8(handle, NVS_KEY_LAST_PROFILE, save_profile);
+    if (nullptr != sol_tcc) {
+        sol_tcc->isr_disable();
+        vTaskDelay(5);
+    }
+    esp_err_t e = nvs_set_u8(MAP_NVS_HANDLE, NVS_KEY_LAST_PROFILE, save_profile);
     if (ESP_OK == e) {
-        e = nvs_commit(handle);
+        e = nvs_commit(MAP_NVS_HANDLE);
+    }
+    if (nullptr != sol_tcc) {
+        sol_tcc->isr_enable();
     }
     return e;
 }

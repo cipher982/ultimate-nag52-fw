@@ -1028,7 +1028,7 @@ void Gearbox::controller_loop()
     ESP_LOG_LEVEL(ESP_LOG_INFO, "GEARBOX", "GEARBOX START!");
     uint32_t expire_check = GET_CLOCK_TIME() + 100; // 100ms
     egs_can_hal->set_safe_start(true);
-    sol_tcc->isr_enable(); // Safe to enable ISR now that all init is done
+    sol_tcc->start_timer(); // Safe to start TCC timer ISR now that all boot NVS init is done
     while (GET_CLOCK_TIME() < expire_check)
     {
         // default behavior: enable start
@@ -1314,8 +1314,7 @@ void Gearbox::controller_loop()
                                 this->shift_adapter->save();
                             }
                             this->tcc->save();
-                            sol_tcc->isr_enable();
-                            // Save profile
+                            // Save profile inside the TCC ISR guard as well
                             if (ShifterStyle::EWM == shifter->get_shifter_type()) {
                                 if (ETS_CURRENT_SETTINGS.ewm_save_profile) {
                                     // We know that the profile is valid based on
@@ -1335,6 +1334,7 @@ void Gearbox::controller_loop()
                                     }
                                 }
                             }
+                            sol_tcc->isr_enable();
                         }
                         else if (this->shifter_pos == ShifterPosition::N)
                         {

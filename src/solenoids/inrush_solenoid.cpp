@@ -2,42 +2,53 @@
 #include "esp_check.h"
 #include "tcu_maths.h"
 #include "soc/gpio_struct.h"
+#include "soc/ledc_struct.h"
 
 // AT 12.0V
-const uint16_t INRUSH_START_PWM = 224; // Any PWM below this will just write 0 to solenoid (Not enough open time for arm to move)
-const uint16_t INRUSH_SKIP_PWM = 3220; // Any PWM above this will skip inrush and just go to hold as there is enough current
-const uint16_t INRUSH_TIME_US = 15000; 
-const uint16_t INRUSH_PWM = 4096;
-const uint16_t HOLD_PWM = 1300;
-const uint32_t TOTAL_PERIOD_TIME_US = 100000; // Timer runs at 10MHz, Hydralic PWM is 100Hz, so 10_000_000/100
+const DRAM_ATTR uint16_t INRUSH_START_PWM = 224; // Any PWM below this will just write 0 to solenoid (Not enough open time for arm to move)
+const DRAM_ATTR uint16_t INRUSH_SKIP_PWM = 3220; // Any PWM above this will skip inrush and just go to hold as there is enough current
+const DRAM_ATTR uint16_t INRUSH_TIME_US = 15000; 
+const DRAM_ATTR uint16_t INRUSH_PWM = 4096;
+const DRAM_ATTR uint16_t HOLD_PWM = 1300;
+const DRAM_ATTR uint32_t TOTAL_PERIOD_TIME_US = 100000; // Timer runs at 10MHz, Hydralic PWM is 100Hz, so 10_000_000/100
 
+static DRAM_ATTR portMUX_TYPE callback_mux = portMUX_INITIALIZER_UNLOCKED;
+static DRAM_ATTR bool callback_blocked = true;
 
 static bool IRAM_ATTR inrush_solenoid_timer_isr(gptimer_handle_t timer, const gptimer_alarm_event_data_t *edata, void *user_data) {
-    InrushControlSolenoid* solenoid = reinterpret_cast<InrushControlSolenoid*>(user_data);
-    uint32_t next_alarm_in = solenoid->on_timer_interrupt();
-    gptimer_alarm_config_t alarm_config = {
-        .alarm_count = edata->alarm_value + next_alarm_in,
-        .reload_count = 0u,
-        .flags = {
-            .auto_reload_on_alarm = 0u
-        }
-    };
-    gptimer_set_alarm_action(timer, &alarm_config);
-    return true;
+    portENTER_CRITICAL_ISR(&callback_mux);
+    if (!callback_blocked) {
+        InrushControlSolenoid* solenoid = reinterpret_cast<InrushControlSolenoid*>(user_data);
+        uint32_t next_alarm_in = MAX(solenoid->on_timer_interrupt(), 1u);
+        gptimer_alarm_config_t alarm_config = {
+            .alarm_count = edata->alarm_value + next_alarm_in,
+            .reload_count = 0u,
+            .flags = {
+                .auto_reload_on_alarm = 0u
+            }
+        };
+        gptimer_set_alarm_action(timer, &alarm_config);
+    }
+    portEXIT_CRITICAL_ISR(&callback_mux);
+    return false;
 }
 
 static bool IRAM_ATTR inrush_solenoid_timer_isr_new(gptimer_handle_t timer, const gptimer_alarm_event_data_t *edata, void *user_data) {
-    InrushControlSolenoid* solenoid = (InrushControlSolenoid*)user_data;
-    uint32_t next_alarm_in = solenoid->on_timer_interrupt_new();
-    gptimer_alarm_config_t alarm_config = {
-        .alarm_count = edata->alarm_value + next_alarm_in,
-        .reload_count = 0u,
-        .flags = {
-            .auto_reload_on_alarm = 0u
-        }
-    };
-    gptimer_set_alarm_action(timer, &alarm_config);
-    return true;
+    portENTER_CRITICAL_ISR(&callback_mux);
+    if (!callback_blocked) {
+        InrushControlSolenoid* solenoid = static_cast<InrushControlSolenoid*>(user_data);
+        uint32_t next_alarm_in = MAX(solenoid->on_timer_interrupt_new(), 1u);
+        gptimer_alarm_config_t alarm_config = {
+            .alarm_count = edata->alarm_value + next_alarm_in,
+            .reload_count = 0u,
+            .flags = {
+                .auto_reload_on_alarm = 0u
+            }
+        };
+        gptimer_set_alarm_action(timer, &alarm_config);
+    }
+    portEXIT_CRITICAL_ISR(&callback_mux);
+    return false;
 }
 
 InrushControlSolenoid::InrushControlSolenoid(const char *name, ledc_timer_t ledc_timer, gpio_num_t pwm_pin, gpio_num_t zener_pin, ledc_channel_t channel, adc_channel_t read_channel, uint16_t period_hz, uint16_t target_hold_current_ma, uint16_t phase_duration_ms)
@@ -111,34 +122,108 @@ void InrushControlSolenoid::post_current_test() {
     this->isr_enable();
 }
 
-void InrushControlSolenoid::isr_disable() {
-    gptimer_stop(this->timer);
+void IRAM_ATTR InrushControlSolenoid::force_output_low() {
     if (GPIO_NUM_NC != this->zener_pin) {
-        gpio_set_level(this->zener_pin, 0);
+        GPIO.out_w1tc = (uint32_t(1) << this->zener_pin) | (uint32_t(1) << this->pwm_pin);
+    } else {
+        auto& channel = LEDC.channel_group[LEDC_HIGH_SPEED_MODE].channel[this->channel];
+        channel.conf0.idle_lv = 0;
+        channel.conf0.sig_out_en = 0;
+        channel.conf1.duty_start = 0;
     }
-    gpio_set_level(this->pwm_pin, 0);
-    this->isr_disabled = true;
+}
+
+void InrushControlSolenoid::start_timer() {
+    portENTER_CRITICAL(&callback_mux);
+    if (this->timer_started) {
+        portEXIT_CRITICAL(&callback_mux);
+        return;
+    }
+    this->timer_started = true;
+    const bool should_start = (0 == this->isr_disable_depth);
+    if (should_start) {
+        this->phase_id = 0;
+        callback_blocked = false;
+    }
+    portEXIT_CRITICAL(&callback_mux);
+    if (should_start) {
+        uint64_t count = 0;
+        gptimer_get_raw_count(this->timer, &count);
+        gptimer_alarm_config_t alarm_config = {
+            .alarm_count = count + TOTAL_PERIOD_TIME_US,
+            .reload_count = 0u,
+            .flags = { .auto_reload_on_alarm = 0u }
+        };
+        gptimer_set_alarm_action(this->timer, &alarm_config);
+        esp_err_t res = gptimer_start(this->timer);
+        if (ESP_OK != res) {
+            portENTER_CRITICAL(&callback_mux);
+            callback_blocked = true;
+            portEXIT_CRITICAL(&callback_mux);
+            this->force_output_low();
+            ESP_LOGE("ICSolenoid", "ICSolenoid %s gptimer_start failed: %s", this->name, esp_err_to_name(res));
+        }
+    }
+}
+
+void InrushControlSolenoid::isr_disable() {
+    portENTER_CRITICAL(&callback_mux);
+    this->isr_disable_depth++;
+    callback_blocked = true;
+    const bool should_stop = (1 == this->isr_disable_depth) && this->timer_started;
+    portEXIT_CRITICAL(&callback_mux);
+    if (should_stop) {
+        gptimer_stop(this->timer);
+        this->force_output_low();
+    }
 }
 
 void InrushControlSolenoid::isr_enable() {
-    esp_err_t res = gptimer_start(this->timer);
-    if (ESP_OK == res) {
-        this->isr_disabled = false;
-    } else {
-        ESP_LOGE("ICSolenoid", "ICSolenoid %s gptimer_start failed: %s", this->name, esp_err_to_name(res));
+    portENTER_CRITICAL(&callback_mux);
+    if (0 == this->isr_disable_depth) {
+        portEXIT_CRITICAL(&callback_mux);
+        return;
+    }
+    this->isr_disable_depth--;
+    const bool should_start = (0 == this->isr_disable_depth) && this->timer_started;
+    if (should_start) {
+        this->phase_id = 0;
+        callback_blocked = false;
+    }
+    portEXIT_CRITICAL(&callback_mux);
+    if (should_start) {
+        uint64_t count = 0;
+        gptimer_get_raw_count(this->timer, &count);
+        gptimer_alarm_config_t alarm_config = {
+            .alarm_count = count + TOTAL_PERIOD_TIME_US,
+            .reload_count = 0u,
+            .flags = { .auto_reload_on_alarm = 0u }
+        };
+        gptimer_set_alarm_action(this->timer, &alarm_config);
+        esp_err_t res = gptimer_start(this->timer);
+        if (ESP_OK != res) {
+            portENTER_CRITICAL(&callback_mux);
+            callback_blocked = true;
+            portEXIT_CRITICAL(&callback_mux);
+            this->force_output_low();
+            ESP_LOGE("ICSolenoid", "ICSolenoid %s gptimer_start failed: %s", this->name, esp_err_to_name(res));
+        }
     }
 }
 
 bool InrushControlSolenoid::is_disabled() {
-    return this->isr_disabled;
+    portENTER_CRITICAL(&callback_mux);
+    const bool disabled = callback_blocked;
+    portEXIT_CRITICAL(&callback_mux);
+    return disabled;
 }
 
-bool on = false;
-bool pwm_on = false;
-bool zener_on = false;
-uint32_t total  = 0;
-bool pwm_en = false;
-uint32_t InrushControlSolenoid::on_timer_interrupt_new() {
+DRAM_ATTR bool on = false;
+DRAM_ATTR bool pwm_on = false;
+DRAM_ATTR bool zener_on = false;
+DRAM_ATTR uint32_t total  = 0;
+DRAM_ATTR bool pwm_en = false;
+uint32_t IRAM_ATTR InrushControlSolenoid::on_timer_interrupt_new() {
     // Control the zener phase
     int ret = TOTAL_PERIOD_TIME_US;
     if (this->inrush_time != 0 || this->hold_time != 0) {
@@ -189,7 +274,7 @@ uint32_t InrushControlSolenoid::on_timer_interrupt_new() {
 }
 
 // 100,000 is 10ms of time
-uint32_t InrushControlSolenoid::on_timer_interrupt() {
+uint32_t IRAM_ATTR InrushControlSolenoid::on_timer_interrupt() {
     uint32_t ret = 0;
     uint16_t write_pwm = 0;
     // Special handling for Min/Max PWM
@@ -218,10 +303,15 @@ uint32_t InrushControlSolenoid::on_timer_interrupt() {
             ret = this->off_time_this_cycle;
         }
     }
-    ledc_set_duty(LEDC_HIGH_SPEED_MODE, this->channel, write_pwm);
-    while (ledc_get_duty(LEDC_HIGH_SPEED_MODE, this->channel) != write_pwm) {
-        ledc_update_duty(LEDC_HIGH_SPEED_MODE, this->channel);
-    }
+    // Direct hardware register write inside ISR; ledc_set_duty may take a fade semaphore.
+    auto& channel = LEDC.channel_group[LEDC_HIGH_SPEED_MODE].channel[this->channel];
+    channel.duty.duty = uint32_t(write_pwm) << 4;
+    channel.conf1.duty_inc = 1;
+    channel.conf1.duty_num = 1;
+    channel.conf1.duty_cycle = 1;
+    channel.conf1.duty_scale = 0;
+    channel.conf0.sig_out_en = 1;
+    channel.conf1.duty_start = 1;
     return ret;
 }
 
