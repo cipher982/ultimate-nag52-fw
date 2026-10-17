@@ -340,7 +340,7 @@ void Gearbox::publish_shift_diagnostic(uint8_t shift_algorithm, GearChange chang
 {
     ShiftDiagnosticSnapshot ret = {};
 
-    ret.schema_version = 1;
+    ret.schema_version = 2;
     if (this->shifting) {
         ret.flags |= 0x01;
     }

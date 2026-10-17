@@ -57,6 +57,7 @@ InrushControlSolenoid::InrushControlSolenoid(const char *name, ledc_timer_t ledc
     this->target_hold_current = target_hold_current_ma;
     this->zener_pin = zener_pin;
     this->pwm_pin = pwm_pin;
+    this->state_mutex = xSemaphoreCreateMutex();
     // Old defaults
     int freq = 10000;
     gptimer_alarm_cb_t callback = inrush_solenoid_timer_isr;
@@ -127,25 +128,25 @@ void IRAM_ATTR InrushControlSolenoid::force_output_low() {
         GPIO.out_w1tc = (uint32_t(1) << this->zener_pin) | (uint32_t(1) << this->pwm_pin);
     } else {
         auto& channel = LEDC.channel_group[LEDC_HIGH_SPEED_MODE].channel[this->channel];
+        channel.duty.duty = 0;
         channel.conf0.idle_lv = 0;
         channel.conf0.sig_out_en = 0;
-        channel.conf1.duty_start = 0;
+        channel.conf1.duty_start = 1;
     }
 }
 
 void InrushControlSolenoid::start_timer() {
-    portENTER_CRITICAL(&callback_mux);
+    if (nullptr != this->state_mutex) {
+        xSemaphoreTake(this->state_mutex, portMAX_DELAY);
+    }
     if (this->timer_started) {
-        portEXIT_CRITICAL(&callback_mux);
+        if (nullptr != this->state_mutex) {
+            xSemaphoreGive(this->state_mutex);
+        }
         return;
     }
     this->timer_started = true;
     const bool should_start = (0 == this->isr_disable_depth);
-    if (should_start) {
-        this->phase_id = 0;
-        callback_blocked = false;
-    }
-    portEXIT_CRITICAL(&callback_mux);
     if (should_start) {
         uint64_t count = 0;
         gptimer_get_raw_count(this->timer, &count);
@@ -155,8 +156,12 @@ void InrushControlSolenoid::start_timer() {
             .flags = { .auto_reload_on_alarm = 0u }
         };
         gptimer_set_alarm_action(this->timer, &alarm_config);
+        portENTER_CRITICAL(&callback_mux);
+        this->phase_id = 0;
+        callback_blocked = false;
+        portEXIT_CRITICAL(&callback_mux);
         esp_err_t res = gptimer_start(this->timer);
-        if (ESP_OK != res) {
+        if (ESP_OK != res && ESP_ERR_INVALID_STATE != res) {
             portENTER_CRITICAL(&callback_mux);
             callback_blocked = true;
             portEXIT_CRITICAL(&callback_mux);
@@ -164,9 +169,15 @@ void InrushControlSolenoid::start_timer() {
             ESP_LOGE("ICSolenoid", "ICSolenoid %s gptimer_start failed: %s", this->name, esp_err_to_name(res));
         }
     }
+    if (nullptr != this->state_mutex) {
+        xSemaphoreGive(this->state_mutex);
+    }
 }
 
 void InrushControlSolenoid::isr_disable() {
+    if (nullptr != this->state_mutex) {
+        xSemaphoreTake(this->state_mutex, portMAX_DELAY);
+    }
     portENTER_CRITICAL(&callback_mux);
     this->isr_disable_depth++;
     callback_blocked = true;
@@ -176,21 +187,23 @@ void InrushControlSolenoid::isr_disable() {
         gptimer_stop(this->timer);
         this->force_output_low();
     }
+    if (nullptr != this->state_mutex) {
+        xSemaphoreGive(this->state_mutex);
+    }
 }
 
 void InrushControlSolenoid::isr_enable() {
-    portENTER_CRITICAL(&callback_mux);
+    if (nullptr != this->state_mutex) {
+        xSemaphoreTake(this->state_mutex, portMAX_DELAY);
+    }
     if (0 == this->isr_disable_depth) {
-        portEXIT_CRITICAL(&callback_mux);
+        if (nullptr != this->state_mutex) {
+            xSemaphoreGive(this->state_mutex);
+        }
         return;
     }
     this->isr_disable_depth--;
     const bool should_start = (0 == this->isr_disable_depth) && this->timer_started;
-    if (should_start) {
-        this->phase_id = 0;
-        callback_blocked = false;
-    }
-    portEXIT_CRITICAL(&callback_mux);
     if (should_start) {
         uint64_t count = 0;
         gptimer_get_raw_count(this->timer, &count);
@@ -200,14 +213,21 @@ void InrushControlSolenoid::isr_enable() {
             .flags = { .auto_reload_on_alarm = 0u }
         };
         gptimer_set_alarm_action(this->timer, &alarm_config);
+        portENTER_CRITICAL(&callback_mux);
+        this->phase_id = 0;
+        callback_blocked = false;
+        portEXIT_CRITICAL(&callback_mux);
         esp_err_t res = gptimer_start(this->timer);
-        if (ESP_OK != res) {
+        if (ESP_OK != res && ESP_ERR_INVALID_STATE != res) {
             portENTER_CRITICAL(&callback_mux);
             callback_blocked = true;
             portEXIT_CRITICAL(&callback_mux);
             this->force_output_low();
             ESP_LOGE("ICSolenoid", "ICSolenoid %s gptimer_start failed: %s", this->name, esp_err_to_name(res));
         }
+    }
+    if (nullptr != this->state_mutex) {
+        xSemaphoreGive(this->state_mutex);
     }
 }
 
