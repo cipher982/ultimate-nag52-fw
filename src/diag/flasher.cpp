@@ -15,7 +15,22 @@ Flasher::Flasher(EgsBaseCan *can_ref, Gearbox* gearbox, Shifter* shifter) {
 }
 
 Flasher::~Flasher() {
+    this->enable_tcc_isr();
     this->gearbox_ref->diag_regain_control(); // Re-enable engine starting
+}
+
+void Flasher::disable_tcc_isr() {
+    if (!this->tcc_isr_disabled) {
+        sol_tcc->isr_disable();
+        this->tcc_isr_disabled = true;
+    }
+}
+
+void Flasher::enable_tcc_isr() {
+    if (this->tcc_isr_disabled) {
+        sol_tcc->isr_enable();
+        this->tcc_isr_disabled = false;
+    }
 }
 
 /**
@@ -67,11 +82,10 @@ void Flasher::on_request_download(const uint8_t* args, uint16_t arg_len, DiagMes
     // Must be 4096 byte sector aligned
     int erase_len = (dest_mem_size + 4096 - 1) & -4096;
     // Disable TCC Slenoid since the ISR causes flash cache errors
-    if (nullptr != sol_tcc) {
-        sol_tcc->isr_disable();
-        vTaskDelay(20);
-    }
+    this->disable_tcc_isr();
+    vTaskDelay(20);
     if (esp_flash_erase_region(esp_flash_default_chip, dest_mem_address, erase_len) != ESP_OK) {
+        this->enable_tcc_isr();
         global_make_diag_neg_msg(dest, SID_REQ_DOWNLOAD, NRC_GENERAL_REJECT);
         return;
     }
@@ -165,6 +179,8 @@ void Flasher::on_transfer_data(uint8_t* args, uint16_t arg_len, DiagMessage* des
             // Next block
             this->block_counter++;
             if (esp_flash_write(esp_flash_default_chip, reinterpret_cast<const void*>(&args[1]), this->start_addr + this->written_data, arg_len-1) != ESP_OK) {
+                this->data_dir = 0;
+                this->enable_tcc_isr();
                 global_make_diag_neg_msg(dest, SID_TRANSFER_DATA, NRC_UN52_OTA_WRITE_FAIL);
                 return;
             } else {
@@ -203,7 +219,9 @@ void Flasher::on_transfer_data(uint8_t* args, uint16_t arg_len, DiagMessage* des
 
 void Flasher::on_transfer_exit(uint8_t* args, uint16_t arg_len, DiagMessage* dest) {
     this->data_dir = 0; // Invalidate it
-    // Return control back to TCM
+    if (!this->is_ota) {
+        this->enable_tcc_isr();
+    }
     if (nullptr != this->gearbox_ref) {
         this->gearbox_ref->diag_regain_control();
     }
@@ -225,12 +243,14 @@ void Flasher::on_request_verification(uint8_t* args, uint16_t arg_len, DiagMessa
         if (e != ESP_OK) {
             res[1] = FLASH_CHECK_STATUS_INVALID;
             ESP_LOG_LEVEL(ESP_LOG_ERROR, "FLASHER", "Flash check failed! %s", esp_err_to_name(e));
+            this->enable_tcc_isr();
             return global_make_diag_pos_msg(dest, SID_START_ROUTINE_BY_LOCAL_IDENT, res, 2);
         }
         e = esp_ota_set_boot_partition(part);
         if (e != ESP_OK) {
             res[1] = FLASH_CHECK_STATUS_INVALID;
             ESP_LOG_LEVEL(ESP_LOG_ERROR, "FLASHER", "Set boot partition failed! %s", esp_err_to_name(e));
+            this->enable_tcc_isr();
             return global_make_diag_pos_msg(dest, SID_START_ROUTINE_BY_LOCAL_IDENT, res, 2);
         }
         res[1] = FLASH_CHECK_STATUS_OK;
@@ -238,5 +258,6 @@ void Flasher::on_request_verification(uint8_t* args, uint16_t arg_len, DiagMessa
     } else {
         res[1] = FLASH_CHECK_STATUS_OK;
     }
+    this->enable_tcc_isr();
     return global_make_diag_pos_msg(dest, SID_START_ROUTINE_BY_LOCAL_IDENT, res, 2);
 }
