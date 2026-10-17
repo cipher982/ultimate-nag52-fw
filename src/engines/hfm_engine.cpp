@@ -77,19 +77,15 @@ float HfmEngine::get_ML(float mle, int16_t iat, int16_t air_pressure)
 
 void HfmEngine::load(void)
 {
-    if (nullptr != sol_tcc) {
-        sol_tcc->isr_disable();
-        vTaskDelay(5);
-    }
+    sol_tcc->isr_disable();
+    vTaskDelay(5);
     if(hfm_engine_mass_air_flow) {
         hfm_engine_mass_air_flow->reset_from_flash();
     }
     if(hfm_engine_max_mass_air_flow) {
         hfm_engine_max_mass_air_flow->reset_from_flash();
     }
-    if (nullptr != sol_tcc) {
-        sol_tcc->isr_enable();
-    }
+    sol_tcc->isr_enable();
     if(print_data){
         print();
     }
@@ -97,19 +93,15 @@ void HfmEngine::load(void)
 
 void HfmEngine::save(void)
 {
-    if (nullptr != sol_tcc) {
-        sol_tcc->isr_disable();
-        vTaskDelay(5);
-    }
+    sol_tcc->isr_disable();
+    vTaskDelay(5);
     if(hfm_engine_mass_air_flow) {
         hfm_engine_mass_air_flow->save_to_eeprom();
     }
     if(hfm_engine_max_mass_air_flow) {
         hfm_engine_max_mass_air_flow->save_to_eeprom();
     }
-    if (nullptr != sol_tcc) {
-        sol_tcc->isr_enable();
-    }
+    sol_tcc->isr_enable();
     if(print_data){
         print();
     }
