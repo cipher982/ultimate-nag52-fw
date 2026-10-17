@@ -343,7 +343,12 @@ void TorqueConverter::process_open_or_slip_state(SensorData* sd, GearboxGear cur
 
             } else {
                 pid_p_weight = (int)interpolate_linear_array(slip_delta, 5, TCC_PID_X, TCC_PID_PZ_PUSH);
-                pid_i_weight = (int)interpolate_linear_array(slip_delta, 5, TCC_PID_X, TCC_PID_IZ_PUSH);
+                if (0 == this->timer_till_pid) {
+                    pid_i_weight = (int)interpolate_linear_array(slip_delta, 5, TCC_PID_X, TCC_PID_IZ_PUSH);
+                } else {
+                    pid_i_weight = 0;
+                    this->pid_i_val = ((this->pid_p_weight * slip_delta) / 1000) * -10;
+                }
             }
             int i_adder = (((this->pid_i_weight * slip_delta) / 100) * 20) / 100;
             this->pid_i_val += i_adder;
@@ -487,6 +492,9 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
     // disabled gear (e.g. 4->3 with D3 disabled, or 4->5 if D5 is disabled)
     // release at shift start rather than staying locked through the gear change.
     auto is_gear_tcc_disabled = [](GearboxGear g) {
+        if (g < GearboxGear::First || g > GearboxGear::Fifth) {
+            return true;
+        }
         return (g == GearboxGear::First && !TCC_CURRENT_SETTINGS.enable_d1) ||
                (g == GearboxGear::Second && !TCC_CURRENT_SETTINGS.enable_d2) ||
                (g == GearboxGear::Third && !TCC_CURRENT_SETTINGS.enable_d3) ||
