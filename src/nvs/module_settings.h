@@ -50,9 +50,9 @@ typedef struct {
 const TCC_MODULE_SETTINGS TCC_DEFAULT_SETTINGS = {
     .adapt_enable = true,
     .pid_enable = true,
-    .enable_d1 = true,
-    .enable_d2 = true,
-    .enable_d3 = true,
+    .enable_d1 = false,
+    .enable_d2 = false,
+    .enable_d3 = false,
     .enable_d4 = true,
     .enable_d5 = true,
     .react_on_engine_slip_request = true,
