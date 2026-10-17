@@ -337,6 +337,7 @@ void TorqueConverter::process_open_or_slip_state(SensorData* sd, GearboxGear cur
                 if (0 == this->timer_till_pid) {
                         this->pid_i_weight = (int)interpolate_linear_array(slip_delta, 5, TCC_PID_X, TCC_PID_IZ_PULL);
                 } else {
+                    this->pid_i_weight = 0;
                     this->pid_i_val = ((this->pid_p_weight * slip_delta) / 1000) * -10;
                 }
 
@@ -481,24 +482,25 @@ void TorqueConverter::update(GearboxGear curr_gear, GearboxGear targ_gear, Press
         return;
     }
 
-    GearboxGear cmp_gear = curr_gear;
     this->slip_target = this->calculate_slip_target(sensors);
-    // TCC Disable check
-    if (
-        ((cmp_gear == GearboxGear::First && !TCC_CURRENT_SETTINGS.enable_d1)||
-        (cmp_gear == GearboxGear::Second && !TCC_CURRENT_SETTINGS.enable_d2)||
-        (cmp_gear == GearboxGear::Third && !TCC_CURRENT_SETTINGS.enable_d3) ||
-        (cmp_gear == GearboxGear::Fourth && !TCC_CURRENT_SETTINGS.enable_d4)||
-        (cmp_gear == GearboxGear::Fifth && !TCC_CURRENT_SETTINGS.enable_d5))
-    ) {
+    // TCC Disable check: check both current and target gear so shifts into a
+    // disabled gear (e.g. 4->3 with D3 disabled, or 4->5 if D5 is disabled)
+    // release at shift start rather than staying locked through the gear change.
+    auto is_gear_tcc_disabled = [](GearboxGear g) {
+        return (g == GearboxGear::First && !TCC_CURRENT_SETTINGS.enable_d1) ||
+               (g == GearboxGear::Second && !TCC_CURRENT_SETTINGS.enable_d2) ||
+               (g == GearboxGear::Third && !TCC_CURRENT_SETTINGS.enable_d3) ||
+               (g == GearboxGear::Fourth && !TCC_CURRENT_SETTINGS.enable_d4) ||
+               (g == GearboxGear::Fifth && !TCC_CURRENT_SETTINGS.enable_d5);
+    };
+    if (is_gear_tcc_disabled(curr_gear) || is_gear_tcc_disabled(targ_gear)) {
         this->slip_target = SLIP_V_WHEN_OPEN*2; // 200RPM = Way out of open range
     }
-    this->process_open_or_slip_state(sensors, curr_gear);
-
     if (is_shifting) {
         this->timer_till_pid = 50;
         this->timer_till_adapt = 150;
     }
+    this->process_open_or_slip_state(sensors, curr_gear);
     pm->set_target_tcc_pressure(this->tcc_commanded_pressure);
 }
 
