@@ -1397,36 +1397,44 @@ void Gearbox::controller_loop()
                     {
                         if (this->shifter_pos == ShifterPosition::P)
                         {
+                            const ShifterPosition prev_position = last_position;
                             this->target_gear = GearboxGear::Park;
                             last_position = this->shifter_pos;
-                            sol_tcc->isr_disable();
-                            vTaskDelay(5);
-                            if (this->shift_adapter != nullptr)
+                            // Skip redundant NVS writes on cold-boot Park acquisition
+                            // (prev_position == SignalNotAvailable): all maps and profile
+                            // state were just loaded from NVS in setup_tcm(). Save only
+                            // when entering Park from a known selector position.
+                            if (prev_position != ShifterPosition::SignalNotAvailable)
                             {
-                                this->shift_adapter->save();
-                            }
-                            this->tcc->save();
-                            // Save profile inside the TCC ISR guard as well
-                            if (ShifterStyle::EWM == shifter->get_shifter_type()) {
-                                if (ETS_CURRENT_SETTINGS.ewm_save_profile) {
-                                    // We know that the profile is valid based on
-                                    // use selection (EWM button code) - So we don't need to check this
-                                    uint8_t tag = this->current_profile->get_profile_id();
-                                    // By default, we can save, but just check if manual profile without
-                                    // the user wanting to save manual profiles
-                                    bool can_save = true;
-                                    if (tag == PROFILE_IDX_M || tag == PROFILE_IDX_R || tag == PROFILE_IDX_W) {
-                                        can_save = ETS_CURRENT_SETTINGS.ewm_save_profile_manual;
-                                    }
-                                    if (can_save) {
-                                        esp_err_t res = EEPROM::ewm_btn_save_profile(tag);
-                                        if (ESP_OK != res) {
-                                            ESP_LOGW("EWM SAVE", "Profile could not be saved to NVS");
+                                sol_tcc->isr_disable();
+                                vTaskDelay(5);
+                                if (this->shift_adapter != nullptr)
+                                {
+                                    this->shift_adapter->save();
+                                }
+                                this->tcc->save();
+                                // Save profile inside the TCC ISR guard as well
+                                if (ShifterStyle::EWM == shifter->get_shifter_type()) {
+                                    if (ETS_CURRENT_SETTINGS.ewm_save_profile) {
+                                        // We know that the profile is valid based on
+                                        // use selection (EWM button code) - So we don't need to check this
+                                        uint8_t tag = this->current_profile->get_profile_id();
+                                        // By default, we can save, but just check if manual profile without
+                                        // the user wanting to save manual profiles
+                                        bool can_save = true;
+                                        if (tag == PROFILE_IDX_M || tag == PROFILE_IDX_R || tag == PROFILE_IDX_W) {
+                                            can_save = ETS_CURRENT_SETTINGS.ewm_save_profile_manual;
+                                        }
+                                        if (can_save) {
+                                            esp_err_t res = EEPROM::ewm_btn_save_profile(tag);
+                                            if (ESP_OK != res) {
+                                                ESP_LOGW("EWM SAVE", "Profile could not be saved to NVS");
+                                            }
                                         }
                                     }
                                 }
+                                sol_tcc->isr_enable();
                             }
-                            sol_tcc->isr_enable();
                         }
                         else if (this->shifter_pos == ShifterPosition::N)
                         {

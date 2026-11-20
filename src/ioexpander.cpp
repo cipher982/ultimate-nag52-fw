@@ -101,7 +101,7 @@ void IOExpander::read_from_ioexpander(void)
 			{
 				last_i2c_query_time = now;
 			}
-			else
+			else if (ESP_ERR_TIMEOUT != e)
 			{
 				ESP_LOGE(name, "Could not read from I2C I/O expander: %s", esp_err_to_name(e));
 			}
@@ -115,7 +115,7 @@ void IOExpander::write_to_ioexpander(void)
 	{
 		// write to I2C I/O expander
 		esp_err_t e = i2c_master_transmit(this->dev_handle, i2c_tx_bytes, 2, 5);
-		if (ESP_OK != e)
+		if (ESP_OK != e && ESP_ERR_TIMEOUT != e)
 		{
 			ESP_LOGE(name, "Could not write to I2C I/O expander: %s", esp_err_to_name(e));
 		}

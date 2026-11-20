@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host verification suite for the G55 V15 (origin/dev + G55 safety/diag patches) branch."""
+"""Host verification suite for the G55 V15/V16 (origin/dev + G55 safety/diag patches) branch."""
 
 from __future__ import annotations
 
@@ -36,11 +36,11 @@ def test_nvs_isr_guard_checker_catches_unwrapped_park_profile_save(tmp_path: Pat
     gearbox_cpp = (REPO / "src" / "gearbox.cpp").read_text()
     # Simulate V13's bug: closing isr_enable() before ewm_btn_save_profile
     broken = gearbox_cpp.replace(
-        "this->tcc->save();\n                            // Save profile inside the TCC ISR guard as well",
-        "this->tcc->save();\n                            sol_tcc->isr_enable();\n                            // Save profile outside guard",
+        "this->tcc->save();\n                                // Save profile inside the TCC ISR guard as well",
+        "this->tcc->save();\n                                sol_tcc->isr_enable();\n                                // Save profile outside guard",
     ).replace(
-        "                            sol_tcc->isr_enable();\n                        }\n                        else if (this->shifter_pos == ShifterPosition::N)",
-        "                        }\n                        else if (this->shifter_pos == ShifterPosition::N)",
+        "                                sol_tcc->isr_enable();\n                            }\n                        }\n                        else if (this->shifter_pos == ShifterPosition::N)",
+        "                            }\n                        }\n                        else if (this->shifter_pos == ShifterPosition::N)",
     )
     assert broken != gearbox_cpp
     fake_src = tmp_path / "src"
@@ -49,6 +49,37 @@ def test_nvs_isr_guard_checker_catches_unwrapped_park_profile_save(tmp_path: Pat
     mod.SRC = fake_src
     findings = mod.find_violations()
     assert any("ewm_btn_save_profile" in f for f in findings), findings
+
+
+def test_boot_in_park_skips_redundant_nvs_save() -> None:
+    """Verify Gearbox::controller_loop only writes Park NVS blobs when entering P from a known position."""
+    gearbox_cpp = (REPO / "src" / "gearbox.cpp").read_text()
+    assert "const ShifterPosition prev_position = last_position;" in gearbox_cpp
+    assert "if (prev_position != ShifterPosition::SignalNotAvailable)" in gearbox_cpp
+
+
+def test_sdkconfig_and_build_flags_prevent_ipa_iram_escapes() -> None:
+    """Verify sdkconfig and CMake/PlatformIO flags guard against GCC IPA IRAM escapes."""
+    cmake_txt = (REPO / "CMakeLists.txt").read_text()
+    pio_ini = (REPO / "platformio.ini").read_text()
+    assert "-fno-ipa-sra" in cmake_txt and "-fno-partial-inlining" in cmake_txt
+    assert "-fno-ipa-sra" in pio_ini and "-fno-partial-inlining" in pio_ini
+
+    elf = REPO / ".pio" / "build" / "unified" / "firmware.elf"
+    cmd = [sys.executable, str(REPO / "tools" / "check_iram_isr_safety.py")]
+    if elf.is_file():
+        res = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, check=False)
+        assert res.returncode == 0, res.stderr + res.stdout
+    else:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "check_iram_isr_safety", REPO / "tools" / "check_iram_isr_safety.py"
+        )
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert mod.check_sdkconfig(REPO / "sdkconfig.unified") == []
 
 
 def test_v15_cpp_invariants() -> None:
@@ -113,3 +144,13 @@ int main() {
             check=True,
         )
         subprocess.run([str(bin_path)], check=True)
+
+
+if __name__ == "__main__":
+    test_nvs_isr_guard_checker_clean()
+    with tempfile.TemporaryDirectory() as td:
+        test_nvs_isr_guard_checker_catches_unwrapped_park_profile_save(Path(td))
+    test_boot_in_park_skips_redundant_nvs_save()
+    test_sdkconfig_and_build_flags_prevent_ipa_iram_escapes()
+    test_v15_cpp_invariants()
+    print("OK: all host invariants passed")
