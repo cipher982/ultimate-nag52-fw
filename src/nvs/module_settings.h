@@ -48,13 +48,13 @@ typedef struct {
 } __attribute__ ((packed)) TCC_MODULE_SETTINGS;
 
 const TCC_MODULE_SETTINGS TCC_DEFAULT_SETTINGS = {
-    .adapt_enable = true,
-    .pid_enable = true,
+    .adapt_enable = false,
+    .pid_enable = false,
     .enable_d1 = false,
     .enable_d2 = false,
     .enable_d3 = false,
-    .enable_d4 = true,
-    .enable_d5 = true,
+    .enable_d4 = false,
+    .enable_d5 = false,
     .react_on_engine_slip_request = true,
     .react_on_engine_open_request = true,
     .prefill_pressure = 10000,

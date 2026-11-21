@@ -164,7 +164,7 @@ esp_err_t EEPROM::init_eeprom() {
                     res = nvs_entry_next(&it);
                     bool found = false;
                     static const char* const LEGACY_ROLLBACK_KEYS[] = {
-                        "TCC_AB", "GAR_A3", "TCC_S_ADAPT_3", "TCC_L_ADAPT_3", "ADP_FR_A2", "ADP_AP_A2"
+                        "TCC_AB", "GAR_A3", "TCC_S_ADAPT_3", "TCC_L_ADAPT_3", "ADP_FR_A2", "ADP_AP_A2", "SBS_A7"
                     };
                     for (int i = 0; i < ALL_NVS_KEYS_LEN; i++) {
                         if (0 == strcmp(*ALL_NVS_KEYS[i], info.key)) {

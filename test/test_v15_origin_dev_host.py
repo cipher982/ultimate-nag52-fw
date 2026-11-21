@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host verification suite for the G55 V15/V16 (origin/dev + G55 safety/diag patches) branch."""
+"""Host verification suite for the G55 V15/V16/V17 (origin/dev + G55 safety/diag patches) branch."""
 
 from __future__ import annotations
 
@@ -82,8 +82,24 @@ def test_sdkconfig_and_build_flags_prevent_ipa_iram_escapes() -> None:
         assert mod.check_sdkconfig(REPO / "sdkconfig.unified") == []
 
 
+def test_v17_rollback_keys_and_start_enable_invariants() -> None:
+    """Verify V17 NVS rollback key preservation and PR #272 start-enable sync invariants."""
+    eeprom_cpp = (REPO / "src" / "nvs" / "eeprom_config.cpp").read_text()
+    assert '"SBS_A7"' in eeprom_cpp, "SBS_A7 must remain in LEGACY_ROLLBACK_KEYS for V16 rollback"
+
+    gearbox_h = (REPO / "src" / "gearbox.h").read_text()
+    gearbox_cpp = (REPO / "src" / "gearbox.cpp").read_text()
+    main_cpp = (REPO / "src" / "main.cpp").read_text()
+    assert "std::atomic<bool> diag_stop_control{false};" in gearbox_h
+    assert "std::atomic<bool> is_start_safe{false};" in gearbox_h
+    assert "bool get_is_start_safe(void) const { return this->is_start_safe && !this->diag_stop_control; }" in gearbox_h
+    assert "this->is_start_safe = lock_state;" in gearbox_cpp
+    assert "egs_can_hal->set_safe_start(this->get_is_start_safe());" in gearbox_cpp
+    assert "gearbox->get_is_start_safe()" in main_cpp
+
+
 def test_v15_cpp_invariants() -> None:
-    """Compile and run host C++ checks for TCC_DEFAULT_SETTINGS, BOOT_INFO, and ShiftDiagnosticSnapshot."""
+    """Compile and run host C++ checks for TCC_DEFAULT_SETTINGS, SBS_MODULE_SETTINGS, BOOT_INFO, and ShiftDiagnosticSnapshot."""
     harness = r"""
 #include <cassert>
 #include <cstdint>
@@ -100,15 +116,17 @@ typedef int esp_err_t;
 #include "src/canbus/egs52_torque.h"
 
 int main() {
-    // 1. G55 safe TCC_AC defaults: D1-D3 disabled, D4-D5 enabled, PID and adapt enabled
-    assert(TCC_DEFAULT_SETTINGS.adapt_enable == true);
-    assert(TCC_DEFAULT_SETTINGS.pid_enable == true);
+    // 1. G55 fail-closed safe TCC_AC defaults: all lockup gears, PID, and adapt disabled
+    assert(TCC_DEFAULT_SETTINGS.adapt_enable == false);
+    assert(TCC_DEFAULT_SETTINGS.pid_enable == false);
     assert(TCC_DEFAULT_SETTINGS.enable_d1 == false);
     assert(TCC_DEFAULT_SETTINGS.enable_d2 == false);
     assert(TCC_DEFAULT_SETTINGS.enable_d3 == false);
-    assert(TCC_DEFAULT_SETTINGS.enable_d4 == true);
-    assert(TCC_DEFAULT_SETTINGS.enable_d5 == true);
+    assert(TCC_DEFAULT_SETTINGS.enable_d4 == false);
+    assert(TCC_DEFAULT_SETTINGS.enable_d5 == false);
     assert(sizeof(TCC_MODULE_SETTINGS) == 14);
+    assert(sizeof(SBS_MODULE_SETTINGS) == 14);
+    assert(SBS_DEFAULT_SETTINGS.kickdown_rearm_rpm_offset == 500);
     assert(sizeof(GAR_MODULE_SETTINGS) == 16);
 
     // 2. Wire size invariants for RLI 0x2E and RLI 0x2F
@@ -152,5 +170,6 @@ if __name__ == "__main__":
         test_nvs_isr_guard_checker_catches_unwrapped_park_profile_save(Path(td))
     test_boot_in_park_skips_redundant_nvs_save()
     test_sdkconfig_and_build_flags_prevent_ipa_iram_escapes()
+    test_v17_rollback_keys_and_start_enable_invariants()
     test_v15_cpp_invariants()
     print("OK: all host invariants passed")
