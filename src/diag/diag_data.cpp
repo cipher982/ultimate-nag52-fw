@@ -231,10 +231,9 @@ kwp_result_t set_tcm_config(TCM_CORE_CONFIG cfg) {
         ESP_LOG_LEVEL(ESP_LOG_ERROR, "SET_TCM_CFG", "4Matic was requested, but TC ratio was 0");
         return NRC_SUB_FUNC_NOT_SUPPORTED_INVALID_FORMAT;
     }
-    sol_tcc->isr_disable();
-    vTaskDelay(5);
+    if (nullptr != sol_tcc) { sol_tcc->isr_disable(); vTaskDelay(5); }
     esp_err_t res = EEPROM::save_core_config(&cfg);
-    sol_tcc->isr_enable();
+    if (nullptr != sol_tcc) { sol_tcc->isr_enable(); }
     if (res == ESP_OK) {
         return 0x00; // OK!
     } else {

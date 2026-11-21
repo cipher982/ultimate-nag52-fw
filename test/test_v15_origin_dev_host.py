@@ -96,6 +96,17 @@ def test_v17_rollback_keys_and_start_enable_invariants() -> None:
     assert "this->is_start_safe = lock_state;" in gearbox_cpp
     assert "egs_can_hal->set_safe_start(this->get_is_start_safe());" in gearbox_cpp
     assert "gearbox->get_is_start_safe()" in main_cpp
+    assert "this->timer_shifter_n = 10;" not in gearbox_cpp, (
+        "timer_shifter_n = 10 can latch Neutral with lever in D after a <200 ms N excursion"
+    )
+
+    flasher_cpp = (REPO / "src" / "diag" / "flasher.cpp").read_text()
+    diag_data_cpp = (REPO / "src" / "diag" / "diag_data.cpp").read_text()
+    kwp_cpp = (REPO / "src" / "diag" / "kwp2000.cpp").read_text()
+    assert "if (!this->tcc_isr_disabled && nullptr != sol_tcc)" in flasher_cpp
+    assert "if (nullptr != this->gearbox_ref)" in flasher_cpp
+    assert "if (nullptr != sol_tcc) { sol_tcc->isr_disable();" in diag_data_cpp
+    assert kwp_cpp.count("if (nullptr != sol_tcc)") >= 8
 
 
 def test_v15_cpp_invariants() -> None:

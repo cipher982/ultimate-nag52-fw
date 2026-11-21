@@ -1478,7 +1478,6 @@ void Gearbox::controller_loop()
                                 this->target_gear = this->last_motion_gear;
                             }
                             last_position = this->shifter_pos;
-                            this->timer_shifter_n = 10;
                         }
                     }
                 }

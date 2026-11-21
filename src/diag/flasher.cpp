@@ -16,11 +16,13 @@ Flasher::Flasher(EgsBaseCan *can_ref, Gearbox* gearbox, Shifter* shifter) {
 
 Flasher::~Flasher() {
     this->enable_tcc_isr();
-    this->gearbox_ref->diag_regain_control(); // Re-enable engine starting
+    if (nullptr != this->gearbox_ref) {
+        this->gearbox_ref->diag_regain_control(); // Re-enable engine starting
+    }
 }
 
 void Flasher::disable_tcc_isr() {
-    if (!this->tcc_isr_disabled) {
+    if (!this->tcc_isr_disabled && nullptr != sol_tcc) {
         sol_tcc->isr_disable();
         this->tcc_isr_disabled = true;
     }
@@ -28,7 +30,9 @@ void Flasher::disable_tcc_isr() {
 
 void Flasher::enable_tcc_isr() {
     if (this->tcc_isr_disabled) {
-        sol_tcc->isr_enable();
+        if (nullptr != sol_tcc) {
+            sol_tcc->isr_enable();
+        }
         this->tcc_isr_disabled = false;
     }
 }
